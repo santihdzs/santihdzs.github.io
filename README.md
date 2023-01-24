@@ -1,2 +1,2 @@
 # santihdzs.github.io
-Website displaying some of my projects!
+Home page containing a link to my portfolio and social media.
