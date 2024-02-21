@@ -1276,3 +1276,8 @@ canvas {
   left: 0;
   z-index: -1;
 }
+
+.safariOverflow {
+  position: relative;
+  overflow-x: hidden;
+}
