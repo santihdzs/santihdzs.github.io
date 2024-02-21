@@ -60,6 +60,7 @@ body {
   gap: var(--section-spacing);
   padding-inline: var(--page-padding-inline);
   overflow-x: hidden;
+  -webkit-overflow-x: hidden;
   overscroll-behavior-y: none;
 }
 
@@ -1251,6 +1252,7 @@ html {
   background: rgb(20, 20, 20);
   position: relative;
   overflow-x: hidden;
+  -webkit-overflow-x: hidden;
   overscroll-behavior-y: none;
 }
 
@@ -1280,4 +1282,5 @@ canvas {
 .safariOverflow {
   position: relative;
   overflow-x: hidden;
+  -webkit-overflow-x: hidden;
 }
