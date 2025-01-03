@@ -1,4 +1,4 @@
-# Personal Website by Santi Hernandez
+# Personal Website
 
-A website created by Santi Hernandez. URL: [https://santihdzs.com](https://santihdzs.com).
+Files for my personal website, which contains some of my projects and some information about me. URL: [https://santihdzs.com](https://santihdzs.com).
 
