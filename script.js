@@ -76,11 +76,6 @@ for(const input of inputs) {
   }
 }
 /* MOBILE */
-function NewTabtwtm() {
-  window.open(
-  "https://twitter.com/SantiHdzs","_self");
-}
-
 function NewTabigm() {
   window.open(
   "https://instagram.com/sanxti","_self");

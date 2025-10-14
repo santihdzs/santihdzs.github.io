@@ -2,14 +2,25 @@
 <html lang="en" >
 <head>
   <meta charset="UTF-8">
-  <title>SantiHdzs</title>
+  <title>Santi Hernández</title>
   <meta name="description" content="This site features some of my projects as well as links to all my socials.">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+
+  <!-- Google Fonts -->
   <link rel="preconnect" href="https://fonts.googleapis.com">
-  <meta name="viewport" content="width=device-width, initial-scale=1"><link rel='stylesheet' href='https://cdnjs.cloudflare.com/ajax/libs/font-awesome/5.15.1/css/all.min.css'><link rel="stylesheet" href="./style.css">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=Archivo:wght@300;600;900&display=swap" rel="stylesheet"><link rel="stylesheet" href="./style.css">
-  <link rel='stylesheet' href='https://cdnjs.cloudflare.com/ajax/libs/font-awesome/4.7.0/css/font-awesome.min.css'><link rel="stylesheet" href="./style.css">
+  <link href="https://fonts.googleapis.com/css2?family=Archivo:wght@300;600;900&display=swap" rel="stylesheet">
+
+  <!-- Font Awesome 7.1.0 -->
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/7.0.1/css/all.min.css" integrity="…appropriate integrity…" crossorigin="anonymous" referrerpolicy="no-referrer" />
+
+
+  <!-- Local Styles -->
+  <link rel="stylesheet" href="./style.css">
   <link rel="icon" href="/images/icon.svg">
+
+  <!-- <link rel='stylesheet' href='https://cdnjs.cloudflare.com/ajax/libs/font-awesome/5.15.1/css/all.min.css'> -->
+  <!-- <link rel='stylesheet' href='https://cdnjs.cloudflare.com/ajax/libs/font-awesome/4.7.0/css/font-awesome.min.css'> -->
   
 </head>
 <body>
@@ -27,9 +38,6 @@
 </li>
 <li class="icon spotifymobile" onclick="NewTabspm()">
   <span><i class="fab fa-spotify"></i></span>
-</li>
-<li class="icon twittermobile" onclick="NewTabtwtm()">
-  <span><i class="fab fa-twitter"></i></span>
 </li>
 <li class="icon githubmobile" onclick="NewTabgitm()">
   <span><i class="fab fa-github"></i></span>
@@ -61,13 +69,13 @@
   <article>
     
     <div class="ipsGrid_span7 ipsType_left">
-    <h2 class="ipsGrid_span5 gs_reveal gs_reveal_fromLeft">About me</h2>
-    <p class="gs_reveal">I&rsquo;m Santi, a computer science student from Mexico City learning about software and web development. Over time, I&rsquo;ve come across websites and ideas that caught my eye because of their uniqueness and ingenuity. Eventually, this interest culminated, inspiring me to create some of my own&nbsp;projects.</p>
+    <h2 class="ipsGrid_span5 gs_reveal gs_reveal_fromLeft">About Me</h2>
+    <p class="gs_reveal">I&rsquo;m Santi, a computer science student and researcher from Mexico City. Over time, I&rsquo;ve come across projects that caught my eye because of their uniqueness and ingenuity. Eventually, this interest culminated, inspiring me to create some of my own&nbsp;projects.</p>
     <p class="gs_reveal">I created this website three years ago as a way for me to play around with HTML; it has since become a way for me to document my learning and some of my favorite&nbsp;projects.</p>
     </div>
 
     <div class="ipsGrid_span7 ipsType_left">
-    <h2 class="ipsGrid_span5 gs_reveal gs_reveal_fromLeft">My work</h2>
+    <h2 class="ipsGrid_span5 gs_reveal gs_reveal_fromLeft">My Work</h2>
     <p class="gs_reveal">Over time, I've had the opportunity to work on various projects related to different branches of computer science.  My favorite pieces of work range from papers on cybersecurity and mathematical modeling, to full-stack applications like&nbsp;MyTutor.</p>
     <p class="gs_reveal">Here are some projects I currently really enjoy; you can click on any card to directly visit the site it&nbsp;displays.</p>
     <div class='container ipsGrid_span5'>
@@ -93,7 +101,7 @@
                 <div class="card-info">
                   <div class="card-info-title">
                     <h3>MyTutor</h3>  
-                    <h4>Tutoring app built with Node and SQL.</h4>
+                    <h4>Full-stack web app built with Node.</h4>
                   </div>    
                 </div>
               </div>
@@ -105,8 +113,8 @@
               <div class="card-info-wrapper">
                 <div class="card-info">
                   <div class="card-info-title">
-                    <h3>Theme</h3>  
-                    <h4>My custom VS Code theme.</h4>
+                    <h3>VSC Theme</h3>  
+                    <h4>Try out my VS Code theme.</h4>
                   </div>    
                 </div>
               </div>
@@ -119,7 +127,7 @@
                 <div class="card-info">
                   <div class="card-info-title">
                     <h3>Dotfiles</h3>  
-                    <h4>My config files and setup instructions.</h4>
+                    <h4>All my config files.</h4>
                   </div>    
                 </div>
               </div>
@@ -145,7 +153,7 @@
                 <div class="card-info">
                   <div class="card-info-title">
                     <h3>Photo Cleaner</h3>  
-                    <h4>iOS app to clear your photo library </h4>
+                    <h4>iOS app to help clean your library.</h4>
                   </div>    
                 </div>
               </div>
@@ -171,52 +179,43 @@
     </div>
 
     <div class="ipsGrid_span7 ipsType_left" id="ABOUTME">
-    <h2 class="ipsGrid_span5 gs_reveal gs_reveal_fromLeft">Contact</h2>
-    <p class="gs_reveal">You can get in touch with me through any of these plataforms:&nbsp;</p>
+    <h2 class="ipsGrid_span5 gs_reveal gs_reveal_fromLeft">Where to Find Me</h2>
+    <p class="gs_reveal">Feel free to explore more of my work or connect with me through these platforms. You can also view my CV by clicking the last icon.&nbsp;</p>
     <ul class="iconul ipsGrid_span5 gs_reveal gs_reveal_fromLeft">
       <li class="iconli">
-        <a class="twitter" href="https://twitter.com/santihdzs" target="_blank">
+        <a class="twitter" href="https://www.linkedin.com/in/santihdzs" target="_blank">
           <span></span>
           <span></span>
           <span></span>
           <span></span>
-          <i class="fa fa-twitter" aria-hidden="true"></i>
+          <i class="fa-brands fa-linkedin" aria-hidden="true"></i>
         </a>
       </li>
       <li class="iconli">
-        <a class="instagram" href="https://instagram.com/sanxti" target="_blank">
+        <a class="instagram" href="https://github.com/santihdzs" target="_blank">
           <span></span>
           <span></span>
           <span></span>
           <span></span>
-          <i class="fa fa-instagram" aria-hidden="true"></i>
+          <i class="fa-brands fa-github" aria-hidden="true"></i>
         </a>
       </li>
       <li class="iconli">
-        <a class="github" href="https://github.com/santihdzs" target="_blank">
+        <a class="github" href="https://www.kaggle.com/santihdzs" target="_blank">
           <span></span>
           <span></span>
           <span></span>
           <span></span>
-          <i class="fa fa-github" aria-hidden="true"></i>
+          <i class="fa-brands fa-kaggle" aria-hidden="true"></i>
         </a>
       </li>
       <li class="iconli">
-        <a class="linkedin" href="https://linkedin.com/in/santihdzs" target="_blank">
+        <a class="youtube" href="/cv.pdf" target="_blank">
           <span></span>
           <span></span>
           <span></span>
           <span></span>
-          <i class="fa fa-linkedin" aria-hidden="true"></i>
-        </a>
-      </li>
-      <li class="iconli">
-        <a class="youtube" href="https://www.youtube.com/c/santihdzs" target="_blank">
-          <span></span>
-          <span></span>
-          <span></span>
-          <span></span>
-          <i class="fa fa-youtube-play" aria-hidden="true"></i>
+          <i class="fa-solid fa-file-lines" aria-hidden="true"></i>
         </a>
       </li>
     </ul>
@@ -226,7 +225,7 @@
 </main>
 
 <footer aria-label="Colophon">
-  <p class="ipsGrid_span5 gs_reveal gs_reveal_fromLeft">Crafted in HTML, CSS &amp; JavaScript by <a href="#">Santiago Hernández</a>.</p>
+  <p class="ipsGrid_span5 gs_reveal gs_reveal_fromLeft">Designed and built by <a href="#">Santiago Hernández</a>.</p>
   <p class="ipsGrid_span5 gs_reveal gs_reveal_fromLeft">©&thinsp;2025</p>
 </footer>
 
