@@ -76,9 +76,9 @@ for(const input of inputs) {
   }
 }
 /* MOBILE */
-function NewTabigm() {
+function NewTablnm() {
   window.open(
-  "https://instagram.com/sanxti","_self");
+  "https://www.linkedin.com/in/santihdzs","_self");
 }
 
 function NewTabgitm() {
@@ -86,14 +86,9 @@ function NewTabgitm() {
   "https://github.com/santihdzs","_self");
 }
 
-function NewTabytm() {
+function NewTabcvm() {
   window.open(
-  "https://youtube.com/c/SantiHdzs","_self");
-}
-
-function NewTabscm() {
-  window.open(
-  "https://www.snapchat.com/add/santihdzs?share_id=Eeg1tvp3SBaSz7kvjckZTg&locale=en_MX","_self");
+  "https://santihdzs.com//cv.pdf","_self");
 }
 
 function NewTabspm() {

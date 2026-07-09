@@ -1178,17 +1178,10 @@ footer a {
   text-shadow: 0px -1px 0px rgba(0, 0, 0, 0.1);
 }
 
-.mobilewrapper .twittermobile:hover,
-.mobilewrapper .twittermobile:hover .tooltip,
-.mobilewrapper .twittermobile:hover .tooltip::before {
-  background: #1DA1F2;
-  color: #ffffff;
-}
-
-.mobilewrapper .instagrammobile:hover,
-.mobilewrapper .instagrammobile:hover .tooltip,
-.mobilewrapper .instagrammobile:hover .tooltip::before {
-  background: #E4405F;
+.mobilewrapper .linkedinmobile:hover,
+.mobilewrapper .linkedinmobile:hover .tooltip,
+.mobilewrapper .linkedinmobile:hover .tooltip::before {
+  background: #0A66C2;
   color: #ffffff;
 }
 
@@ -1199,13 +1192,6 @@ footer a {
   color: #ffffff;
 }
 
-.mobilewrapper .snapchatmobile:hover,
-.mobilewrapper .snapchatmobile:hover .tooltip,
-.mobilewrapper .snapchatmobile:hover .tooltip::before {
-  background: #FFFC00;
-
-}
-
 .mobilewrapper .spotifymobile:hover,
 .mobilewrapper .spotifymobile:hover .tooltip,
 .mobilewrapper .spotifymobile:hover .tooltip::before {
@@ -1214,21 +1200,14 @@ footer a {
 
 }
 
-.mobilewrapper .youtubemobile:hover,
-.mobilewrapper .youtubemobile:hover .tooltip,
-.mobilewrapper .youtubemobile:hover .tooltip::before {
-  background: #CD201F;
+.mobilewrapper .cvmobile:hover,
+.mobilewrapper .cvmobile:hover .tooltip,
+.mobilewrapper .cvmobile:hover .tooltip::before {
+  background: #333333;
   color: #ffffff;
 
 }
 
-.mobilewrapper .discordmobile:hover,
-.mobilewrapper .discordmobile:hover .tooltip,
-.mobilewrapper .discordmobile:hover .tooltip::before {
-  background: #7289DA;
-  color: #ffffff;
-
-}
 @media screen and (max-width: 600px) {
   .ipsGrid_span7 {
     display: none !important;
