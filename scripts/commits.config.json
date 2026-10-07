@@ -1,0 +1,13 @@
+{
+  "user": "santihdzs",
+  "allow": [],
+  "deny": [],
+  "dropMessages": [
+    "^merge (pull request|branch|remote-tracking branch|tag)\\b",
+    "^merge .+ into .+",
+    "^(initial|first) commit\\b",
+    "^init\\.?$",
+    "^wip\\.?$"
+  ],
+  "maxLanguages": 7
+}

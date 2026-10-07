@@ -1,0 +1,17 @@
+name = "now-playing"
+main = "src/index.js"
+compatibility_date = "2026-10-01"
+
+# served only at now-playing.<account>.workers.dev; no per version preview urls
+workers_dev = true
+preview_urls = false
+
+[vars]
+# extra origins allowed to read the endpoint, comma separated. production and localhost are built in.
+ALLOWED_ORIGINS = ""
+
+# spotify may rotate the refresh token on use, so the latest one is persisted here.
+# create it with `npx wrangler kv namespace create NOW_PLAYING` and paste the id below.
+[[kv_namespaces]]
+binding = "NOW_PLAYING"
+id = "57706577ea7d4042a3afa48151136405"

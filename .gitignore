@@ -1,0 +1,30 @@
+# os
+.DS_Store
+
+# local assistant state
+.claude/
+
+# dependencies, at any depth
+node_modules/
+
+# dev tool output: screenshots, rocket frames, lighthouse reports, playwright artifacts
+tools/out/
+playwright-report/
+test-results/
+blob-report/
+
+# wrangler local state and local secrets, at any depth
+.wrangler/
+.dev.vars
+.dev.vars.*
+
+# a wrangler config at the repo root only ever comes from running wrangler in the wrong folder
+/wrangler.json
+/wrangler.jsonc
+/wrangler.toml
+
+# env files
+.env
+.env.*
+!.env.example
+!.dev.vars.example

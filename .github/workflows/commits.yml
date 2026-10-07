@@ -1,0 +1,53 @@
+name: refresh commits and pull requests
+
+on:
+  schedule:
+    - cron: '23 6 * * *'
+  workflow_dispatch:
+
+# read only by default; only the refresh job may write, and it only commits the data files
+permissions:
+  contents: read
+
+# never two refreshes at once
+concurrency:
+  group: refresh-data
+  cancel-in-progress: false
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 20
+
+      - name: build data/commits.json
+        run: node scripts/build-commits.mjs
+        env:
+          GH_TOKEN: ${{ secrets.COMMITS_PAT || secrets.GITHUB_TOKEN }}
+
+      - name: build data/prs.json and assets/orgs
+        run: node scripts/build-prs.mjs
+        env:
+          GH_TOKEN: ${{ secrets.COMMITS_PAT || secrets.GITHUB_TOKEN }}
+
+      - name: commit if changed
+        run: |
+          git add -- data/commits.json data/prs.json
+          if [ -d assets/orgs ]; then git add -A -- assets/orgs; fi
+          if git diff --cached --quiet; then
+            echo "no changes"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -m "data: refresh commits and pull requests"
+          git push

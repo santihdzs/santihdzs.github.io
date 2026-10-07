@@ -1,0 +1,10 @@
+{
+  "generated": "2026-10-07T08:08:46Z",
+  "user": "santihdzs",
+  "mock": false,
+  "prs": [
+    {"owner":"google","repo":"flax","number":5474,"title":"Add docstrings to nnx filterlib filter classes","url":"https://github.com/google/flax/pull/5474","merged":false,"createdAt":"2026-05-29T04:16:34Z","mergedAt":null,"additions":45,"deletions":0,"files":1,"logo":"./assets/orgs/google.png"},
+    {"owner":"rust-lang","repo":"rustc-dev-guide","number":2872,"title":"Update date references for 2026-05 triage (#2861)","url":"https://github.com/rust-lang/rustc-dev-guide/pull/2872","merged":true,"createdAt":"2026-05-15T01:01:18Z","mergedAt":"2026-05-29T03:04:11Z","additions":1,"deletions":5,"files":5,"logo":"./assets/orgs/rust-lang.png"},
+    {"owner":"python","repo":"cpython","number":148534,"title":"gh-72406: Document argument ordering in argparse help output","url":"https://github.com/python/cpython/pull/148534","merged":true,"createdAt":"2026-04-13T22:57:56Z","mergedAt":"2026-04-14T16:24:17Z","additions":3,"deletions":0,"files":1,"logo":"./assets/orgs/python.png"}
+  ]
+}

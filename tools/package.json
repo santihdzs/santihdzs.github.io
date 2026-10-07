@@ -1,0 +1,14 @@
+{
+  "name": "portfolio-dev-tools",
+  "private": true,
+  "description": "dev only: local server and browser checks. nothing here ships with the site.",
+  "type": "module",
+  "scripts": {
+    "serve": "node serve.mjs",
+    "check": "node check.mjs"
+  },
+  "devDependencies": {
+    "lighthouse": "13.5.0",
+    "playwright": "1.63.0"
+  }
+}

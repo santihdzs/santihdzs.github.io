@@ -1,0 +1,262 @@
+.topbar {
+  position: fixed;
+  inset: 0 0 auto;
+  z-index: 20;
+  height: var(--topbar-h);
+  pointer-events: none;
+}
+
+.topbar::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(to bottom, var(--bg) 0%, rgba(6, 8, 11, 0.82) 38%, rgba(6, 8, 11, 0) 100%);
+  transition: opacity 0.6s ease;
+}
+
+.topbar-inner {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  width: min(var(--wrap), 100% - 2 * var(--gutter));
+  height: 100%;
+  margin-inline: auto;
+  padding-bottom: 14px;
+}
+
+.topbar-inner > * {
+  pointer-events: auto;
+}
+
+.mode-toggle {
+  margin-left: auto;
+}
+
+main {
+  position: relative;
+  z-index: 1;
+  overflow-x: clip;
+}
+
+/* invisible on the plain background, it only carves space when a star drifts behind a glyph */
+main,
+.site-footer {
+  text-shadow: 0 0 3px var(--bg), 0 0 10px var(--bg);
+}
+
+.hero {
+  position: relative;
+  /* its own stacking context, so the orbit sits above this box but under the hero text */
+  z-index: 0;
+  display: flex;
+  align-items: flex-end;
+  width: min(var(--wrap), 100% - 2 * var(--gutter));
+  min-height: 100vh;
+  min-height: 100svh;
+  margin-inline: auto;
+  padding-block: var(--topbar-h) clamp(4.5rem, 13vh, 8.5rem);
+}
+
+.hero-inner {
+  max-width: 44rem;
+}
+
+/* boxes hug their text so the satellite can be reached wherever no words cover it */
+.hero-inner > * {
+  width: fit-content;
+  max-width: 100%;
+}
+
+.hero-kicker {
+  font: 400 var(--mono-m) / 1.4 var(--font-mono);
+  color: var(--muted);
+  letter-spacing: 0.01em;
+}
+
+.hero-name {
+  margin-top: 1.1rem;
+  font-size: var(--name);
+  font-weight: 600;
+  line-height: 0.98;
+  letter-spacing: -0.035em;
+}
+
+.hero-lede {
+  margin-top: 1.6rem;
+  max-width: 40ch;
+  font-size: var(--step-1);
+  font-weight: 300;
+  line-height: 1.5;
+  color: var(--text);
+}
+
+.hero-links {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.6rem 1.6rem;
+  margin-top: 2.2rem;
+  font-size: var(--mono-m);
+}
+
+.linktree {
+  display: none;
+}
+
+[data-intro] {
+  animation: intro-up 0.9s var(--ease-out) both;
+  animation-delay: calc(var(--i, 0) * 90ms + 80ms);
+}
+
+@keyframes intro-up {
+  from {
+    opacity: 0;
+    transform: translateY(24px);
+  }
+}
+
+.section {
+  display: grid;
+  grid-template-columns: minmax(9rem, 13rem) minmax(0, 1fr);
+  column-gap: clamp(2rem, 5vw, 4.5rem);
+  width: min(var(--wrap), 100% - 2 * var(--gutter));
+  margin-inline: auto;
+  padding-block: var(--section-pad);
+  border-top: 1px solid var(--line);
+}
+
+.rail {
+  align-self: start;
+  position: sticky;
+  top: calc(var(--topbar-h) + 1rem);
+  padding-top: 0.3rem;
+  font: 400 var(--mono-m) / 1.4 var(--font-mono);
+  color: var(--muted);
+}
+
+.rail-n {
+  color: var(--text);
+}
+
+.section-body {
+  min-width: 0;
+}
+
+.prose {
+  max-width: var(--measure);
+}
+
+.prose p + p {
+  margin-top: 1.2em;
+}
+
+.prose p {
+  color: var(--text);
+  font-weight: 300;
+  font-size: var(--step-1);
+  line-height: 1.65;
+}
+
+.sub {
+  font-size: var(--step-0);
+  font-weight: 600;
+  letter-spacing: -0.005em;
+  margin-bottom: 1rem;
+}
+
+.sub ~ .sub {
+  margin-top: 3.5rem;
+}
+
+.site-footer {
+  position: relative;
+  z-index: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2.75rem;
+  width: min(var(--wrap), 100% - 2 * var(--gutter));
+  margin-inline: auto;
+  padding-block: 4.5rem 3.5rem;
+  border-top: 1px solid var(--line);
+}
+
+.stats {
+  font: 400 var(--mono-s) / 1.5 var(--font-mono);
+  color: var(--muted);
+  text-align: center;
+}
+
+@media (max-width: 880px) {
+  .section {
+    grid-template-columns: minmax(0, 1fr);
+    row-gap: 1.75rem;
+  }
+
+  .rail {
+    position: static;
+  }
+}
+
+@media (max-width: 720px) {
+  .topbar,
+  .section,
+  .site-footer,
+  .hero-lede,
+  .hero-links {
+    display: none;
+  }
+
+  .hero {
+    align-items: center;
+    justify-content: center;
+    padding-block: 3.5rem;
+  }
+
+  .hero-inner {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    width: 100%;
+    max-width: 26rem;
+    text-align: center;
+  }
+
+  .hero-name {
+    order: 0;
+    margin-top: 0;
+    font-size: clamp(2.25rem, 10vw, 2.75rem);
+  }
+
+  .hero-kicker {
+    order: 1;
+    margin-top: 0.9rem;
+    font-size: var(--mono-s);
+  }
+
+  .linktree {
+    order: 2;
+    display: block;
+    width: 100%;
+    margin-top: 2.5rem;
+  }
+
+  /* the name and line paint at once so the first contentful paint is real; only the links stagger in */
+  .hero-name,
+  .hero-kicker {
+    animation: none;
+  }
+
+  .linktree [style*='--i'] {
+    animation: intro-up 0.7s var(--ease-out) both;
+    animation-delay: calc((var(--i) - 2) * 55ms + 60ms);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  [data-intro],
+  .linktree [style*='--i'] {
+    animation: none;
+  }
+}
