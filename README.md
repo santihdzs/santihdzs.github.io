@@ -75,7 +75,7 @@ A github actions workflow (`.github/workflows/commits.yml`) runs daily and on de
 commits `data/commits.json`, `data/prs.json` and `assets/orgs/` only when something changed. It uses the
 `COMMITS_PAT` secret when present, otherwise the default `GITHUB_TOKEN`.
 
-Run them by hand with node 20 or newer, no install step. Both read a token from `GH_TOKEN`, `GITHUB_TOKEN` or
+Run them by hand with node 24 or newer, no install step. Both read a token from `GH_TOKEN`, `GITHUB_TOKEN` or
 `gh auth token`, and both leave their files untouched when nothing changed.
 
 ```sh
