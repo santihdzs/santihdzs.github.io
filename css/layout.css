@@ -183,9 +183,30 @@ main,
 }
 
 .stats {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  /* exactly " · " in the mono font */
+  column-gap: 3ch;
   font: 400 var(--mono-s) / 1.5 var(--font-mono);
   color: var(--muted);
   text-align: center;
+}
+
+.stats-data {
+  position: relative;
+}
+
+/* the dot sits in the gap, so it never decides where the line wraps */
+.stats-dot {
+  position: absolute;
+  right: 100%;
+  width: 3ch;
+  opacity: 0.6;
+}
+
+.stats.is-wrapped .stats-dot {
+  display: none;
 }
 
 @media (max-width: 880px) {

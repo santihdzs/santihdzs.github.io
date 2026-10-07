@@ -459,8 +459,8 @@ async function robustChecks(gpu) {
   page.on('pageerror', (e) => errs.push(e.message));
   await page.goto(ORIGIN + '/', { waitUntil: 'networkidle' });
   await sleep(1200);
-  v = await page.evaluate(() => ({ canvas: document.querySelectorAll('canvas').length, stats: document.querySelector('.stats').hidden }));
-  check('failed data fetch: no scene, footer line hidden, no exceptions', v.canvas === 0 && v.stats && !errs.length);
+  v = await page.evaluate(() => ({ canvas: document.querySelectorAll('canvas').length, stats: document.querySelector('.stats').textContent.trim(), dot: !!document.querySelector('.stats-dot') }));
+  check('failed data fetch: no scene, footer shows only the copyright, no exceptions', v.canvas === 0 && v.stats === '© 2026 Santiago Hernández' && !v.dot && !errs.length, v.stats);
   await ctx.close();
 
   // tiny and empty datasets

@@ -10,13 +10,26 @@ let pageReady = false;
 let session = null;
 let generation = 0;
 
+// the copyright is static in the page; the dot and the stat join it once the data loads
 function showStats(data) {
   const el = document.querySelector('.stats');
   const repos = new Set(data.commits.map((c) => c.repo)).size;
   if (!el || !data.commits.length) return;
   const n = data.commits.length;
-  el.textContent = `${n} ${n === 1 ? 'commit' : 'commits'} across ${repos} ${repos === 1 ? 'repo' : 'repos'}, refreshed daily`;
-  el.hidden = false;
+  let stat = el.querySelector('.stats-data');
+  if (!stat) {
+    stat = document.createElement('span');
+    stat.className = 'stats-data';
+    el.append(stat);
+    // the dot only shows while both parts share a line, so a wrapped stat never starts with it
+    const copy = el.firstElementChild;
+    new ResizeObserver(() => el.classList.toggle('is-wrapped', stat.offsetTop > copy.offsetTop)).observe(el);
+  }
+  const dot = document.createElement('span');
+  dot.className = 'stats-dot';
+  dot.setAttribute('aria-hidden', 'true');
+  dot.textContent = '·';
+  stat.replaceChildren(dot, `${n} ${n === 1 ? 'commit' : 'commits'} across ${repos} ${repos === 1 ? 'repo' : 'repos'}`);
 }
 
 async function startScene(s, id) {
