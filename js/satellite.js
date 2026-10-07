@@ -6,6 +6,11 @@ const POLL_MS = 30000;
 const PERIOD = { playing: 90, recent: 240 };
 const TILT = (-9 * Math.PI) / 180;
 const SVG = 'http://www.w3.org/2000/svg';
+const TEXT = '.hero-kicker, .hero-name, .hero-lede, .hero-links';
+// the tile is judged where it will be LEAD seconds ahead (half the css fade on .sat-body), so each fade is half done
+// as it meets or clears the text. it dims on touch but only brightens once this far clear, so it never flickers on an edge
+const LEAD = 0.25;
+const CLEAR = 6;
 
 // stand in artwork for the mock, generated so the mock makes no network request
 const MOCK_ART = `data:image/svg+xml,${encodeURIComponent(
@@ -74,13 +79,17 @@ export function createSatellite({ endpoint, mock, reduced }) {
   const ellipses = orbit.querySelectorAll('ellipse');
   const spot = orbit.querySelector('.orbit-spot');
   const link = orbit.querySelector('.satellite');
+  const body = orbit.querySelector('.sat-body');
   const art = orbit.querySelector('.sat-art');
   const eyebrow = orbit.querySelector('.sat-eyebrow');
   const trackEl = orbit.querySelector('.sat-track');
   const artistsEl = orbit.querySelector('.sat-artists');
 
   const geo = { cx: 0, cy: 0, rx: 0, ry: 0, w: 0, h: 0 };
+  const tile = { w: 0, h: 0 };
   const motion = { speed: 1 };
+  let boxes = [];
+  let behind = false;
   let angle = -0.55;
   let state = null;
   let timer = 0;
@@ -106,26 +115,60 @@ export function createSatellite({ endpoint, mock, reduced }) {
       e.setAttribute('ry', geo.ry.toFixed(1));
       e.setAttribute('transform', `rotate(${((TILT * 180) / Math.PI).toFixed(2)} ${geo.cx.toFixed(1)} ${geo.cy.toFixed(1)})`);
     }
+    measure();
     place();
   }
 
+  // hero text boxes in hero coordinates, read only on layout. offsets ignore the intro's translate
+  function measure() {
+    boxes = [...anchor.querySelectorAll(TEXT)].map((el) => {
+      let x = 0;
+      let y = 0;
+      for (let n = el; n && n !== hero; n = n.offsetParent) {
+        x += n.offsetLeft;
+        y += n.offsetTop;
+      }
+      return { l: x, t: y, r: x + el.offsetWidth, b: y + el.offsetHeight };
+    });
+    tile.w = body.offsetWidth;
+    tile.h = body.offsetHeight;
+  }
+
+  const covers = (l, t, pad) => boxes.some((b) => l < b.r + pad && l + tile.w > b.l - pad && t < b.b + pad && t + tile.h > b.t - pad);
+
+  function setBehind(on) {
+    if (on === behind) return;
+    behind = on;
+    orbit.classList.toggle('is-behind', on);
+  }
+
+  function point(a) {
+    const ex = Math.cos(a) * geo.rx;
+    const ey = Math.sin(a) * geo.ry;
+    return [geo.cx + ex * Math.cos(TILT) - ey * Math.sin(TILT), geo.cy + ex * Math.sin(TILT) + ey * Math.cos(TILT)];
+  }
+
   function place() {
-    const ex = Math.cos(angle) * geo.rx;
-    const ey = Math.sin(angle) * geo.ry;
-    const x = geo.cx + ex * Math.cos(TILT) - ey * Math.sin(TILT);
-    const y = geo.cy + ex * Math.sin(TILT) + ey * Math.cos(TILT);
+    const [x, y] = point(angle);
     link.style.transform = `translate(${(x - 16).toFixed(1)}px, ${(y - 16).toFixed(1)}px)`;
     spot.setAttribute('cx', x.toFixed(1));
     spot.setAttribute('cy', y.toFixed(1));
     // the label opens toward the side with room
     orbit.classList.toggle('is-flipped', x > geo.w - 300);
+    const lead = state ? ((LEAD * Math.PI * 2) / PERIOD[state.state]) * motion.speed : 0;
+    const [ax, ay] = point(angle + lead);
+    setBehind(!reduced.matches && covers(ax - 16, ay - 16, behind ? CLEAR : 0));
   }
 
   function tick() {
     const now = performance.now();
     const dt = Math.min((now - last) / 1000, 0.1);
     last = now;
-    if (!state || reduced.matches) return;
+    if (!state || reduced.matches) {
+      // a still satellite never dims
+      setBehind(false);
+      return;
+    }
     angle += ((dt * Math.PI * 2) / PERIOD[state.state]) * motion.speed;
     place();
   }
@@ -202,6 +245,10 @@ export function createSatellite({ endpoint, mock, reduced }) {
   });
 
   const resizer = new ResizeObserver(layout);
+  // text boxes change size when the fonts arrive
+  const onFonts = () => !disposed && !orbit.hidden && layout();
+  document.fonts?.addEventListener('loadingdone', onFonts);
+  document.fonts?.ready.then(onFonts);
   link.addEventListener('pointerenter', () => setOpen(true));
   link.addEventListener('pointerleave', () => setOpen(link.matches(':focus-visible')));
   link.addEventListener('focus', () => setOpen(true));
@@ -222,6 +269,7 @@ export function createSatellite({ endpoint, mock, reduced }) {
       gsap.killTweensOf(motion);
       watcher.disconnect();
       resizer.disconnect();
+      document.fonts?.removeEventListener('loadingdone', onFonts);
       document.removeEventListener('visibilitychange', onVisibility);
       orbit.remove();
     },

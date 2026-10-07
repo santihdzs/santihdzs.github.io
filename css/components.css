@@ -513,6 +513,17 @@
   display: flex;
   align-items: center;
   gap: 7px;
+  transition: opacity 0.5s cubic-bezier(0.37, 0, 0.63, 1);
+}
+
+/* depth cue: the tile dims while it passes behind the hero text, never while open */
+.orbit.is-behind:not(.is-open) .sat-body {
+  opacity: 0.45;
+}
+
+/* hover and focus still bring it back at the quicker pace of the label */
+.orbit.is-open .sat-body {
+  transition-duration: 0.25s;
 }
 
 /* spotify artwork rules: square, 4px corners, nothing drawn over it. ring and glow sit outside */
@@ -659,6 +670,7 @@
 
   .sat-label,
   .orbit.is-open .sat-label,
+  .sat-body,
   .sat-art,
   .orbit-path ellipse {
     transition: none;
