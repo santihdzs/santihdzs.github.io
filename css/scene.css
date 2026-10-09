@@ -192,12 +192,28 @@
 .stars-ui-inner > .browse-group {
   display: flex;
   align-items: center;
-  gap: 0.75rem;
   pointer-events: none;
+  transition: opacity 0.6s ease;
 }
 
 .browse-group > * {
   pointer-events: auto;
+}
+
+/* the footer's separator: centered between browse's text and the toggle's (past its padding and border), so the
+   toggle sits where it would without it. not a control */
+.browse-group > .browse-dot {
+  width: calc(0.75rem + 0.6rem + 1px);
+  margin-right: calc(-0.6rem - 1px);
+  color: var(--muted);
+  opacity: 0.6;
+  text-align: center;
+  pointer-events: none;
+}
+
+/* a pull request card has nothing to browse: the group steps aside like the readout */
+.stars-ui-inner > .browse-group.is-faded {
+  opacity: 0;
 }
 
 /* too narrow to sit beside browse without reaching the centered hint: the toggle stacks just above it */
@@ -207,27 +223,30 @@
     align-items: flex-start;
     gap: 0.25rem;
   }
+
+  .browse-group > .browse-dot {
+    display: none;
+  }
 }
 
+/* no pill: the border keeps its space, so pressing or hovering never moves anything */
 .repo-only {
   min-height: 24px;
   padding: 0 0.6rem;
-  border: 1px solid var(--line);
+  border: 1px solid transparent;
   border-radius: 999px;
   font: 400 0.6875rem / 1 var(--font-mono);
   color: var(--muted);
-  transition: color 0.2s ease, border-color 0.2s ease;
+  transition: color 0.2s ease;
 }
 
 .repo-only:hover,
 .repo-only:focus-visible {
   color: var(--text);
-  border-color: var(--line-strong);
 }
 
 .repo-only[aria-pressed='true'] {
   color: var(--accent);
-  border-color: rgb(var(--accent-rgb) / 0.55);
 }
 
 .readout {
@@ -640,6 +659,7 @@
   .stars-ui,
   .is-stars .stars-ui,
   .hint,
+  .stars-ui-inner > .browse-group,
   .readout,
   .star-ring,
   .focus-pulse,

@@ -23,7 +23,6 @@ export function createField(layout) {
     uLight: { value: new THREE.Vector2() },
     uFocusId: { value: -1 },
     uDim: { value: 0 },
-    uColumn: { value: new THREE.Vector4(1 / 3, 2 / 3, 0.05, 0) },
   };
 
   const material = new THREE.ShaderMaterial({

@@ -174,14 +174,16 @@ export function createCard({ data, reduced, owner, onClose, onStep, companion = 
     fillNav(index, nav, true);
   }
 
-  // the counters and steps, also refreshed in place when the pinned language changes under an open card.
-  // a commit outside the pinned language has no place in its count, so that part is hidden
+  // the counter and steps, also refreshed in place when the pinned language or the repo toggle changes under an
+  // open card. one counter shows, the one the toggle steps through; a commit outside the pinned language has no
+  // place in either, so neither shows
   function fillNav(index, nav, announce) {
     const c = data.commits[index];
     const repo = data.repos[c.repo];
     const langName = repo.primary ?? data.languages[c.lang].name;
-    f.count.hidden = nav.index === null;
+    f.count.hidden = nav.index === null || nav.repoOnly;
     f.count.textContent = nav.index === null ? '' : `${nav.index} of ${nav.total}`;
+    f.pos.hidden = nav.index === null || !nav.repoOnly;
     f.pos.textContent = `${nav.repoIndex} of ${nav.repoTotal} in this repo`;
     const had = document.activeElement;
     prev.disabled = !nav.canPrev;
@@ -190,7 +192,8 @@ export function createCard({ data, reduced, owner, onClose, onStep, companion = 
     if ((had === prev && prev.disabled) || (had === next && next.disabled)) el.focus({ preventScroll: true });
     if (!announce) return;
     const files = c.files == null ? '' : `, ${c.files} ${c.files === 1 ? 'file' : 'files'} changed`;
-    const count = nav.index === null ? '' : ` commit ${nav.index} of ${nav.total}.`;
+    const shown = nav.repoOnly ? f.pos : f.count;
+    const count = shown.hidden ? '' : ` commit ${shown.textContent}.`;
     live.textContent = `${c.message}. ${repo.name}, ${formatDate(c.ts)}. ${c.additions} additions, ${c.deletions} deletions${files}. ${langName}.${count}`;
   }
 

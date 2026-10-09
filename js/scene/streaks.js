@@ -1,7 +1,7 @@
 import * as THREE from 'three';
 import { gsap } from 'gsap';
 import { GLSL as OPTICS, SPRITE } from './optics.js';
-import { SPHERE, COLUMN } from './shaders.js';
+import { SPHERE } from './shaders.js';
 
 // the cadence: one streak every 10 to 20 seconds, never two at once
 const STREAK_INTERVAL = [10, 20];
@@ -16,20 +16,16 @@ const IGNORE = 'a, button, input, select, textarea, label, summary, [role="butto
 
 const headVertex = /* glsl */ `
 ${OPTICS}
-${COLUMN}
 uniform float uPx;
 uniform float uDpr;
 uniform float uMaxPoint;
-uniform float uDim;
 varying float vCore;
-varying float vDim;
 void main() {
   vec4 mv = modelViewMatrix * vec4(position, 1.0);
   float dist = max(-mv.z, 0.001);
   vCore = starCore(uPx, ${HEAD_SIZE.toFixed(3)}, dist);
   gl_PointSize = min(vCore * SPRITE * uDpr, uMaxPoint);
   gl_Position = projectionMatrix * mv;
-  vDim = 1.0 - uDim * column(gl_Position);
 }
 `;
 
@@ -39,8 +35,8 @@ ${SPHERE}
 uniform vec3 uColor;
 uniform vec2 uLight;
 uniform float uAlpha;
+uniform float uDim;
 varying float vCore;
-varying float vDim;
 void main() {
   vec2 c = gl_PointCoord * 2.0 - 1.0;
   float r2 = dot(c, c);
@@ -54,32 +50,27 @@ void main() {
   // a tiny head is a bright point, a near one reads as a small gold sphere
   float shade = smoothstep(5.0, 14.0, vCore) * (1.0 - smoothstep(0.92, 1.0, dot(q, q)));
   vec3 col = mix(point, litSphere(q, uColor, uLight), shade);
-  gl_FragColor = vec4(mix(uColor, col, disc), (disc * 0.95 + halo) * uAlpha * vDim);
+  gl_FragColor = vec4(mix(uColor, col, disc), (disc * 0.95 + halo) * uAlpha * (1.0 - uDim));
 }
 `;
 
-// the tail lies flat to the screen, so its clip position interpolates linearly and the dim runs per fragment
 const tailVertex = /* glsl */ `
 varying vec2 vUv;
-varying vec4 vClip;
 void main() {
   vUv = uv;
   gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
-  vClip = gl_Position;
 }
 `;
 
 const tailFragment = /* glsl */ `
-${COLUMN}
 uniform vec3 uColor;
 uniform float uAlpha;
 uniform float uDim;
 varying vec2 vUv;
-varying vec4 vClip;
 void main() {
   float across = abs(vUv.y - 0.5) * 2.0;
   float a = pow(vUv.x, 1.6) * (1.0 - smoothstep(0.2, 1.0, across)) * uAlpha;
-  gl_FragColor = vec4(uColor, a * (1.0 - uDim * column(vClip)));
+  gl_FragColor = vec4(uColor, a * (1.0 - uDim));
 }
 `;
 
@@ -95,7 +86,8 @@ function shuffled(n, avoid) {
 }
 
 // pull request streaks as real objects in the scene. hover and clicks are hit tested at the
-// document level against the projected head and tail, so they stay reachable over the page.
+// document level against the projected head and tail, so they stay reachable over the page, but only
+// while the scene lets them: under the text mode dim a streak is decoration and clicks pass through.
 export function createStreaks({ prs, reduced, scene, camera, view, uniforms, canFire, onHit }) {
   const root = document.documentElement;
   const inert = { pointer() {}, frame() {}, pause() {}, resume() {}, dispose() {}, fireNow: () => false, screen: () => null, headWorld: () => null, debug: () => null };
@@ -112,7 +104,6 @@ export function createStreaks({ prs, reduced, scene, camera, view, uniforms, can
       uDpr: uniforms.uDpr,
       uMaxPoint: uniforms.uMaxPoint,
       uLight: uniforms.uLight,
-      uColumn: uniforms.uColumn,
       uDim: dim,
       uColor: { value: new THREE.Vector3().fromArray(GOLD.head) },
       uAlpha: { value: 0 },
@@ -129,7 +120,7 @@ export function createStreaks({ prs, reduced, scene, camera, view, uniforms, can
   head.renderOrder = 2;
 
   const tailMat = new THREE.ShaderMaterial({
-    uniforms: { uColor: { value: new THREE.Vector3().fromArray(GOLD.tail) }, uAlpha: { value: 0 }, uColumn: uniforms.uColumn, uDim: dim },
+    uniforms: { uColor: { value: new THREE.Vector3().fromArray(GOLD.tail) }, uAlpha: { value: 0 }, uDim: dim },
     vertexShader: tailVertex,
     fragmentShader: tailFragment,
     transparent: true,
@@ -153,6 +144,7 @@ export function createStreaks({ prs, reduced, scene, camera, view, uniforms, can
   let timer = 0;
   let current = null;
   let catching = false;
+  let live = true;
   let lastPointer = null;
 
   function schedule(ms = (STREAK_INTERVAL[0] + Math.random() * (STREAK_INTERVAL[1] - STREAK_INTERVAL[0])) * 1000) {
@@ -243,7 +235,7 @@ export function createStreaks({ prs, reduced, scene, camera, view, uniforms, can
   const blocked = (target) => target instanceof Element && !!target.closest(IGNORE);
 
   function onClick(e) {
-    if (!current || current.focused || e.button !== 0 || blocked(e.target)) return;
+    if (!live || !current || current.focused || e.button !== 0 || blocked(e.target)) return;
     if (!hit(e.clientX, e.clientY)) return;
     e.preventDefault();
     e.stopPropagation();
@@ -265,11 +257,13 @@ export function createStreaks({ prs, reduced, scene, camera, view, uniforms, can
   return {
     pointer(x, y, target) {
       lastPointer = { x, y, target };
-      setCatching(!!current && !current.focused && !blocked(target) && hit(x, y));
+      setCatching(live && !!current && !current.focused && !blocked(target) && hit(x, y));
     },
     // place the streak for this frame and refresh its projected head for hit testing. amount is the text
-    // mode dim at the middle of the column
-    frame(amount = 0) {
+    // mode dim; interactive false lets go of a caught streak and keeps the pointer off it until it is true again
+    frame(amount = 0, interactive = true) {
+      live = interactive;
+      if (!live) setCatching(false);
       if (!current) return;
       dim.value = amount * (1 - lift.v);
       const { state, start, end } = current;
@@ -302,7 +296,7 @@ export function createStreaks({ prs, reduced, scene, camera, view, uniforms, can
       s.uy = sy / sl;
       const dist = Math.max(0.001, camera.position.z - tmp.z);
       s.size = Math.min(48, Math.max(2, (uniforms.uPx.value * HEAD_SIZE) / dist));
-      if (lastPointer && !current.focused) setCatching(!blocked(lastPointer.target) && hit(lastPointer.x, lastPointer.y));
+      if (live && lastPointer && !current.focused) setCatching(!blocked(lastPointer.target) && hit(lastPointer.x, lastPointer.y));
     },
     // ease to a stop in world space, then call back with the resting head
     pause(done) {

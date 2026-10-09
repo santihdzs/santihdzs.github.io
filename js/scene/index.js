@@ -21,12 +21,11 @@ const DRIFT = 0.0025;
 const PARALLAX = 0.06;
 const MODE_TIME = 0.8;
 const FLIGHT_TIME = 1.1;
-// text mode only: past the hero the field and the streaks dim a little behind the content column. field and streak
-// are the reductions over the column; each side fades out across feather (a share of the viewport width, centered
-// on the column's edge), so the sides keep their brightness. the amount ramps in while the about section's top edge
-// rises from enter to settle (shares of the viewport height from its top) and eases with a time constant of ease
-// seconds. fallback is the column, as shares of the width, when the page cannot be measured
-const DIM = { field: 0.65, streak: 0.75, feather: 0.1, enter: 0.85, settle: 0.3, ease: 0.25, fallback: [1 / 3, 2 / 3] };
+// text mode only: past the hero the field and the streaks dim a little, evenly across the screen. field and streak
+// are the reductions. the amount ramps in while the about section's top edge rises from enter to settle (shares of
+// the viewport height from its top) and eases with a time constant of ease seconds. streaks stop taking the pointer
+// once the eased amount passes release and take it again below rearm, so a slow scroll across the line never flickers
+const DIM = { field: 0.6, streak: 0.75, enter: 0.85, settle: 0.3, ease: 0.25, release: 0.04, rearm: 0.02 };
 
 // overscroll exit at the newest end, armed after some travel. at the edge a new gesture toward the
 // present starts counting. it is new after a pause of at least gap ms that also breaks the stream's
@@ -143,11 +142,11 @@ export function createStarfield({ data, prs = [], reduced, texture = 'nebula' })
   let drag = null;
   let blend = 0;
   // the text mode dim: its eased amount (0 at the hero, 1 with the content in view, 0 under stars mode and a
-  // peek), the column it shades as shares of the viewport width, and the about section's top in document px
+  // peek), whether streaks take the pointer under it, and the about section's top in document px
   let dim = 0;
   let dimForce = null;
+  let catchable = true;
   let aboutTop = 0;
-  const column = { left: DIM.fallback[0], right: DIM.fallback[1] };
   // the readout names the month at one reference depth. in free travel that is the layer as far ahead of the
   // camera as the newest commit sits from home. a flight carries it from where it read to its target on the
   // camera tween's own eased progress, so the month never runs backward and a focused commit reads its own month
@@ -165,11 +164,13 @@ export function createStarfield({ data, prs = [], reduced, texture = 'nebula' })
     <div class="stars-ui-inner">
       <div class="browse-group">
         <button class="browse" type="button">browse commits</button>
+        <span class="browse-dot" aria-hidden="true">·</span>
         <button class="repo-only" type="button" aria-pressed="false" title="step only through this repo's commits">this repo only</button>
       </div>
       <p class="hint"></p>
       <p class="readout" aria-hidden="true"></p>
     </div>`;
+  const group = ui.querySelector('.browse-group');
   const browse = ui.querySelector('.browse');
   const repoToggle = ui.querySelector('.repo-only');
   const hint = ui.querySelector('.hint');
@@ -221,25 +222,17 @@ export function createStarfield({ data, prs = [], reduced, texture = 'nebula' })
     uniforms.uMaxPoint.value = maxPoint;
     canvas.dataset.dpr = String(perf.dpr);
     signature = '';
-    measureColumn();
+    measureAbout();
   }
 
-  // the content column and the about section, read on resize and font load, never per frame
-  function measureColumn() {
+  // the about section's top, read on resize and font load, never per frame
+  function measureAbout() {
     const r = document.querySelector('main .section')?.getBoundingClientRect();
-    if (r && r.width > 0) {
-      column.left = (r.left - view.left) / view.w;
-      column.right = (r.right - view.left) / view.w;
-      aboutTop = r.top + window.scrollY;
-    } else {
-      [column.left, column.right] = DIM.fallback;
-      aboutTop = view.h;
-    }
-    uniforms.uColumn.value.set(column.left, column.right, DIM.feather / 2, 0);
+    aboutTop = r && r.width > 0 ? r.top + window.scrollY : view.h;
   }
 
   const resizer = new ResizeObserver(applySize);
-  const pageResizer = new ResizeObserver(measureColumn);
+  const pageResizer = new ResizeObserver(measureAbout);
   let dprQuery = null;
   function watchDpr() {
     dprQuery?.removeEventListener('change', onDpr);
@@ -301,12 +294,20 @@ export function createStarfield({ data, prs = [], reduced, texture = 'nebula' })
       repoTotal: list.length,
       index: browsable(i) ? index : null,
       total,
+      repoOnly,
     };
   }
 
   function syncBrowse() {
     browse.disabled = firstBrowsable() < 0;
     if (focus >= 0 && card.isOpen && card.kind === 'commit') card.setNav(navFor(focus));
+  }
+
+  // nothing in the browse group acts on a pull request: it fades with the readout and leaves the tab order and the
+  // pointer at once, its pressed and disabled states untouched
+  function showGroup(on) {
+    group.classList.toggle('is-faded', !on);
+    group.inert = !on;
   }
 
   function setHint(text, visible) {
@@ -413,6 +414,9 @@ export function createStarfield({ data, prs = [], reduced, texture = 'nebula' })
     // the readout has nothing to say about a pull request: it holds its month and fades out until the return
     aimReading(readingDepth());
     readout.classList.add('is-faded');
+    // inert drops focus from the group, so a control there is named as the card's opener to get it back on close
+    const opener = group.contains(document.activeElement) ? document.activeElement : undefined;
+    showGroup(false);
     api.onPr?.(true, ctx);
     const duration = still() ? 0 : FLIGHT_TIME;
     gsap.to(look, { intensity: 1, nebula: 1, duration: still() ? 0 : MODE_TIME, ease: 'power2.inOut', overwrite: 'auto' });
@@ -429,7 +433,7 @@ export function createStarfield({ data, prs = [], reduced, texture = 'nebula' })
         overwrite: true,
         onComplete: () => {
           flying = false;
-          if (pr === s) card.show({ kind: 'pr', pr: s.pr });
+          if (pr === s) card.show({ kind: 'pr', pr: s.pr }, opener);
         },
       });
       gsap.to(look, { focal: FLY_DIST, duration, ease: 'power3.inOut', overwrite: 'auto' });
@@ -442,6 +446,8 @@ export function createStarfield({ data, prs = [], reduced, texture = 'nebula' })
     const back = ctx;
     pr = null;
     ctx = null;
+    // back first, so focus that left from the group can return to it
+    showGroup(true);
     const restore = card.hide();
     const duration = still() ? 0 : FLIGHT_TIME;
     flying = true;
@@ -711,6 +717,8 @@ export function createStarfield({ data, prs = [], reduced, texture = 'nebula' })
     const goal = dimForce ?? ramp * (1 - look.nebula);
     dim = rm || Math.abs(goal - dim) < 1e-3 ? goal : dim + (goal - dim) * (1 - Math.exp(-dt / DIM.ease));
     uniforms.uDim.value = dim * DIM.field;
+    if (dim > DIM.release) catchable = false;
+    else if (dim < DIM.rearm) catchable = true;
 
     const k = 1 - Math.exp(-dt * 3);
     const amount = rm ? 0 : busy() ? PARALLAX * 0.3 : PARALLAX;
@@ -730,7 +738,7 @@ export function createStarfield({ data, prs = [], reduced, texture = 'nebula' })
     uniforms.uTwinkle.value = rm ? 0 : 0.12;
     uniforms.uFocusId.value = focus;
     nebula?.update(time, cam, view.w / view.h, blend);
-    streaks.frame(dim * DIM.streak);
+    streaks.frame(dim * DIM.streak, catchable);
 
     updateHover();
     updateReadout();
@@ -740,7 +748,7 @@ export function createStarfield({ data, prs = [], reduced, texture = 'nebula' })
     if (rm) {
       const sig = [
         camera.position.x, camera.position.y, camera.position.z,
-        uniforms.uIntensity.value, uniforms.uFocal.value, drift, blend, uniforms.uDim.value, column.left, column.right,
+        uniforms.uIntensity.value, uniforms.uFocal.value, drift, blend, uniforms.uDim.value,
         uniforms.uHi.value.join(), uniforms.uLo.value.join(), focus, canvas.width, canvas.height,
       ].join('|');
       if (sig === signature) return;
@@ -806,7 +814,7 @@ export function createStarfield({ data, prs = [], reduced, texture = 'nebula' })
   applySize();
   resizer.observe(canvas);
   pageResizer.observe(document.querySelector('main') ?? document.body);
-  document.fonts?.ready.then(measureColumn);
+  document.fonts?.ready.then(measureAbout);
   watchDpr();
   start();
   gsap.to(look, { intensity: CONTENT_INTENSITY, duration: still() ? 0 : 1.6, ease: 'power2.out' });
@@ -954,7 +962,8 @@ export function createStarfield({ data, prs = [], reduced, texture = 'nebula' })
       intensity: uniforms.uIntensity.value,
       nebula: blend,
       dim,
-      column: { left: column.left, right: column.right, feather: DIM.feather, field: DIM.field, streak: DIM.streak },
+      catchable,
+      strength: { field: DIM.field, streak: DIM.streak },
       reading: readingDepth(),
       band: band.value,
       exit: { ...exit },

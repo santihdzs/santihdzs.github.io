@@ -137,15 +137,18 @@ cd tools && npm install
 node check.mjs              # every browser check except live (takes a while)
 node check.mjs prs          # or named sections: static load mobile interact reduced robust perf contrast align
                             # pick overscroll chain browse narrow cardlayout rocket texture accent satellite cards
-                            # prs exits blend nebcolor starscontrast breakpoint fixes dim readout keys serve print live
+                            # prs exits blend nebcolor starscontrast breakpoint fixes dim catch readout keys serve
+                            # print baseline live
 CHECK_LIVE=1 node check.mjs # everything, live included
+CHECK_BASELINE=/path/to/copy node check.mjs baseline   # pixels and controls against a copy of the tree from before a change
 node lighthouse.mjs         # desktop and mobile
 node worker-test.mjs        # the worker against a fake spotify, cache and kv
 node auth-test.mjs          # the pkce helper against a fake accounts server
 ```
 
 The `live` section calls the real worker, so it only runs when named or with `CHECK_LIVE=1`; every other run answers
-the worker's url with a local idle reply and never reaches it. Screenshots, rocket launch frames, a printed pdf and
+the worker's url with a local idle reply and never reaches it. The `baseline` section serves the copy named by
+`CHECK_BASELINE` next to this tree and compares frames drawn on a fake clock, so it runs only when that is set. Screenshots, rocket launch frames, a printed pdf and
 lighthouse reports land in `tools/out/`, which is not committed.
 
 ## license

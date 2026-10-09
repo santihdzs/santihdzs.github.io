@@ -1,14 +1,15 @@
 // dev only browser checks. starts its own server, drives chromium, prints pass/fail.
 // usage: node tools/check.mjs [section ...]
 // sections: static load mobile interact reduced robust perf contrast align pick overscroll chain browse narrow cardlayout rocket texture accent satellite
-//           cards prs exits blend nebcolor starscontrast breakpoint fixes dim readout keys serve print live
+//           cards prs exits blend nebcolor starscontrast breakpoint fixes dim catch readout keys serve print baseline live
 // live calls the real now playing worker, so it only runs when named or with CHECK_LIVE=1. every other run answers
-// the worker's url with a local idle reply and never reaches it.
+// the worker's url with a local idle reply and never reaches it. baseline compares against a copy of the tree named by
+// CHECK_BASELINE, so it runs when named or when that is set.
 import { chromium } from 'playwright';
 import { readFile, readdir, mkdir, writeFile } from 'node:fs/promises';
 import { inflateSync } from 'node:zlib';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { startServer } from './serve.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -18,6 +19,7 @@ const ORIGIN = `http://localhost:${PORT}`;
 const only = process.argv.slice(2);
 const want = (s) => !only.length || only.includes(s);
 const wantLive = only.includes('live') || process.env.CHECK_LIVE === '1';
+const wantBaseline = only.includes('baseline') || (!only.length && !!process.env.CHECK_BASELINE);
 const PROD_WORKER = 'https://now-playing.santihdzs.workers.dev/**';
 const results = [];
 const EM_DASH = String.fromCharCode(0x2014);
@@ -1118,7 +1120,7 @@ async function browseChecks(gpu) {
       return {
         focus: s.focus,
         count: count.hidden ? null : count.textContent,
-        pos: q('.card [data-f="pos"]').textContent,
+        pos: q('.card [data-f="pos"]').hidden ? null : q('.card [data-f="pos"]').textContent,
         prev: q('.card-step[data-step="-1"]').disabled,
         next: q('.card-step[data-step="1"]').disabled,
         rect: [r.x, r.y, r.width, r.height].map(Math.round).join(','),
@@ -1191,7 +1193,8 @@ async function browseChecks(gpu) {
       // repo toggle off: prev and next turn off only where the new pin has nothing further in that direction
       const older = langs.findIndex((l, i) => i > after.focus && l === 0);
       const newer = langs.findLastIndex((l, i) => i < after.focus && l === 0);
-      check('outside the new pin, the open card hides its n of total; prev and next follow the new pin across repos', after.count === null && after.pos === before.pos && after.prev === older < 0 && after.next === newer < 0 && after.browseFilter === 0, JSON.stringify(after));
+      // the toggle is off, so the repo counter stays hidden throughout
+      check('outside the new pin, the open card hides its n of total; prev and next follow the new pin across repos', after.count === null && after.pos === null && before.pos === null && after.prev === older < 0 && after.next === newer < 0 && after.browseFilter === 0, JSON.stringify(after));
       await page.hover('.legend-dot[data-lang="5"]');
       await sleep(200);
       const hovered = await card();
@@ -1238,10 +1241,13 @@ async function repoScopeChecks(gpu) {
     return -1;
   };
   const all = [...Array(n).keys()];
-  const counters = (i, pin) => {
+  // the one counter the card shows: n of total with the toggle off, x of y in this repo with it on, neither for a
+  // commit outside the pin
+  const counters = (i, pin, repoOnly) => {
     const pass = all.filter((j) => keeps(pin, j));
     const repo = all.filter((j) => repoOf(j) === repoOf(i));
-    return { count: keeps(pin, i) ? `${pass.length - pass.indexOf(i)} of ${pass.length}` : null, pos: `${repo.length - repo.indexOf(i)} of ${repo.length} in this repo` };
+    const inside = keeps(pin, i);
+    return { count: inside && !repoOnly ? `${pass.length - pass.indexOf(i)} of ${pass.length}` : null, pos: inside && repoOnly ? `${repo.length - repo.indexOf(i)} of ${repo.length} in this repo` : null };
   };
   const step = (dir) => `.card-step[data-step="${dir}"]`;
   const look = (page) =>
@@ -1249,6 +1255,7 @@ async function repoScopeChecks(gpu) {
       const s = window.__starfield.state();
       const q = (sel) => document.querySelector(sel);
       const count = q('.card [data-f="count"]');
+      const pos = q('.card [data-f="pos"]');
       const r = q('.card').getBoundingClientRect();
       const a = document.activeElement;
       return {
@@ -1260,7 +1267,7 @@ async function repoScopeChecks(gpu) {
         open: !q('.card').hidden,
         hash: q('.card [data-f="hash"]').textContent,
         count: count.hidden ? null : count.textContent,
-        pos: q('.card [data-f="pos"]').textContent,
+        pos: pos.hidden ? null : pos.textContent,
         prev: q('.card-step[data-step="-1"]').disabled,
         next: q('.card-step[data-step="1"]').disabled,
         rect: [r.x, r.y, r.width, r.height].map(Math.round).join(),
@@ -1272,7 +1279,7 @@ async function repoScopeChecks(gpu) {
     });
   // the open card shows the commit in focus, with the reference's disabled states and counters
   const agrees = (v, pin, repoOnly) => {
-    const c = counters(v.focus, pin);
+    const c = counters(v.focus, pin, repoOnly);
     return v.open && !v.flying && v.hash === rows[v.focus].sha.slice(0, 7) && v.prev === ref(v.focus, -1, pin, repoOnly) < 0 && v.next === ref(v.focus, 1, pin, repoOnly) < 0 && v.count === c.count && v.pos === c.pos;
   };
   const QUIET = ['focus', 'cam', 'hash', 'rect', 'live', 'active', 'prev', 'next', 'count', 'pos', 'travel'];
@@ -1301,6 +1308,8 @@ async function repoScopeChecks(gpu) {
         if (!agrees(v, pin, repoOnly)) bad.push(`at ${v.focus}: ${JSON.stringify(v)}`);
         const t = ref(v.focus, dir, pin, repoOnly);
         if (t < 0) {
+          const [, at, of] = (v.count ?? v.pos ?? '').match(/^(\d+) of (\d+)/) ?? [];
+          if (at !== (dir < 0 ? '1' : of)) bad.push(`end ${v.focus} toward ${dir} reads ${v.count ?? v.pos}`);
           await frames(page, 2);
           v = await look(page);
           const before = said;
@@ -1368,6 +1377,46 @@ async function repoScopeChecks(gpu) {
   check('repo toggle: a button beside browse commits, to its right, in one group of the stars ui and not in the card', ui.group && ui.right && ui.smaller && ui.tag === 'BUTTON' && ui.type === 'button', JSON.stringify(ui));
   check('repo toggle: "this repo only", aria-pressed, its title, enabled, off by default', ui.name === 'this repo only' && ui.title === "step only through this repo's commits" && ui.pressed === 'false' && !ui.disabled && ui.repoOnly === false, JSON.stringify(ui));
   check('the card gets no new control', ui.cardControls === 'card-close,hash-chip,card-step,card-step,tlink', ui.cardControls);
+
+  // the group reads "browse commits · this repo only": a plain dot between, spaced and colored like the footer's, and
+  // a toggle with no pill whose box and place never change
+  const groupLook = () =>
+    page.evaluate(() => {
+      const g = document.querySelector('.browse-group');
+      const [b, d, t] = g.children;
+      const glyphs = (node) => {
+        const r = document.createRange();
+        r.selectNodeContents(node);
+        return r.getBoundingClientRect();
+      };
+      const box = (el) => [...Object.values(el.getBoundingClientRect().toJSON())].map((v) => v.toFixed(2)).join();
+      const cs = getComputedStyle(t);
+      const ds = getComputedStyle(d);
+      const fd = document.querySelector('.stats-dot');
+      const fc = document.querySelector('.stats').firstElementChild;
+      const ft = fd.nextSibling;
+      const gd = glyphs(d);
+      d.focus();
+      return {
+        order: [...g.children].map((el) => el.className).join(),
+        text: g.textContent.replace(/\s+/g, ' ').trim(),
+        dot: { hidden: d.getAttribute('aria-hidden'), tag: d.tagName, tabIndex: d.tabIndex, focused: document.activeElement === d, pointer: ds.pointerEvents, under: document.elementFromPoint(gd.x + gd.width / 2, gd.y + gd.height / 2) === d, color: ds.color, opacity: ds.opacity },
+        footer: { color: getComputedStyle(fd).color, opacity: getComputedStyle(fd).opacity, left: glyphs(fd).left - glyphs(fc).right, right: glyphs(ft).left - glyphs(fd).right },
+        left: gd.left - glyphs(b).right,
+        right: glyphs(t).left - gd.right,
+        line: Math.abs(gd.top + gd.bottom - (glyphs(t).top + glyphs(t).bottom)) / 2,
+        border: ['Top', 'Right', 'Bottom', 'Left'].map((k) => `${cs[`border${k}Width`]} ${cs[`border${k}Color`]}`).join(),
+        shadow: cs.boxShadow,
+        outline: cs.outlineStyle,
+        color: cs.color,
+        boxes: [b, d, t].map(box).join(' | '),
+      };
+    });
+  const pres = await groupLook();
+  check('browse group: browse commits, a dot, the toggle, in that order on one line', pres.order === 'browse,browse-dot,repo-only' && pres.text === 'browse commits · this repo only' && pres.line < 2, JSON.stringify(pres));
+  check('browse group: the dot is no control, hidden from assistive tech, never focused, ignoring the pointer', pres.dot.hidden === 'true' && pres.dot.tag === 'SPAN' && pres.dot.tabIndex === -1 && !pres.dot.focused && pres.dot.pointer === 'none' && !pres.dot.under, JSON.stringify(pres.dot));
+  check('browse group: the dot has the footer separator\'s color and even spacing on both sides, like the footer\'s', pres.dot.color === pres.footer.color && pres.dot.opacity === pres.footer.opacity && near(pres.left, pres.right, 1) && near(pres.left, pres.footer.left, 1) && near(pres.footer.left, pres.footer.right, 1), JSON.stringify({ left: pres.left, right: pres.right, footer: pres.footer }));
+  check('repo toggle: no pill, its border space kept transparent, no shadow or outline at rest', pres.border === Array(4).fill('1px rgba(0, 0, 0, 0)').join() && pres.shadow === 'none' && pres.outline === 'none', JSON.stringify(pres));
   await shot('repo-ui-off', UI);
 
   // before a card: the toggle only sets the next browse. no camera movement, no card
@@ -1376,10 +1425,24 @@ async function repoScopeChecks(gpu) {
   await page.mouse.move(720, 600);
   let b = await look(page);
   check('repo toggle with no card: on, no camera movement, no card', b.repoOnly && b.pressed === 'true' && b.cam === a.cam && b.focus === -1 && !b.open, JSON.stringify(b));
+  await sleep(300);
+  const pressedLook = await groupLook();
+  check('repo toggle: pressed and unpressed differ by color alone, and pressing shifts nothing in the group', pressedLook.color !== pres.color && pressedLook.boxes === pres.boxes && pressedLook.border === pres.border, `${pres.color} -> ${pressedLook.color} | ${pres.boxes} -> ${pressedLook.boxes}`);
+  await page.focus('.browse');
+  await page.keyboard.press('Tab');
+  const ring = await page.evaluate(() => {
+    const t = document.querySelector('.repo-only');
+    const cs = getComputedStyle(t);
+    const hex = getComputedStyle(document.documentElement).getPropertyValue('--accent').trim();
+    return { focused: document.activeElement === t && t.matches(':focus-visible'), style: cs.outlineStyle, width: cs.outlineWidth, color: cs.outlineColor, accent: `rgb(${[1, 3, 5].map((k) => parseInt(hex.slice(k, k + 2), 16)).join(', ')})` };
+  });
+  check('repo toggle: the keyboard focus ring is still there, 2px in the accent', ring.focused && ring.style === 'solid' && ring.width === '2px' && ring.color === ring.accent, JSON.stringify(ring));
+  await page.evaluate(() => document.activeElement?.blur());
   await shot('repo-ui-on', UI);
   await browseTo();
   a = await look(page);
   check('browse ignores the toggle: the newest commit overall opens', a.focus === 0 && agrees(a, null, true), JSON.stringify(a));
+  check('the live region names the shown counter: x of y in this repo with the toggle on', a.live.endsWith(` commit ${counters(0, null, true).pos}.`) && !a.live.includes(` of ${n}.`), a.live);
   await page.keyboard.press('ArrowLeft');
   await page.keyboard.press('ArrowLeft');
   b = await look(page);
@@ -1403,12 +1466,14 @@ async function repoScopeChecks(gpu) {
   await frames(page, 2);
   a = await look(page);
   check('repo toggle off: the arrows cross into another repo', a.focus === 2 && repoOf(2) !== repoOf(1), JSON.stringify(a));
+  check('the live region names the shown counter: n of total with the toggle off', a.live.endsWith(` commit ${counters(2, null, false).count}.`) && !a.live.includes('in this repo'), a.live);
   // the shots show the toggle itself, not its accent focus ring
   await page.focus('.card');
   await shot('repo-card-off');
   await page.click('.repo-only');
   b = await look(page);
-  check('repo toggle on at a repo\'s newest commit: next turns off at once, counters, card and camera unchanged', b.repoOnly && b.next && !b.prev && agrees(b, null, true) && b.count === a.count && b.pos === a.pos && b.cam === a.cam && b.hash === a.hash && b.rect === a.rect, JSON.stringify({ a, b }));
+  // one counter line swaps for the other in place; both are one line, so the card keeps its size and place
+  check('repo toggle on at a repo\'s newest commit: next turns off at once, the counter swaps to the repo\'s in place, card and camera unchanged', b.repoOnly && b.next && !b.prev && agrees(b, null, true) && a.count !== null && a.pos === null && b.count === null && b.pos !== null && b.cam === a.cam && b.hash === a.hash && b.rect === a.rect && b.live === a.live, JSON.stringify({ a, b }));
   await page.mouse.move(720, 600);
   await shot('repo-card-next-disabled');
   // a mouse click left focus on the toggle, which the card keeps: the arrows step from there, escape closes
@@ -1644,7 +1709,8 @@ async function repoScopeChecks(gpu) {
     await ctx.close();
   }
 
-  // a pull request card in stars mode keeps its own trap: the toggle never joins it, a click on it hands focus back
+  // a pull request card in stars mode keeps its own trap: the toggle never joins it, and with the group faded out a
+  // click where it sat lands on the field, which closes the card as any click off its head does
   await attempt('repo toggle beside a pull request card', async () => {
     const { page: p, context: ctx, logs: l } = await open(gpu, `${ORIGIN}/?debug&prs=mock`, { width: 1440, height: 900 });
     await sceneReady(p);
@@ -1663,13 +1729,11 @@ async function repoScopeChecks(gpu) {
       await p.keyboard.press('Tab');
       where.push(await p.evaluate(() => (document.querySelector('.card').contains(document.activeElement) ? 'card' : document.activeElement?.className)));
     }
-    await p.click('.repo-only');
+    const box = await p.locator('.repo-only').boundingBox();
+    await p.mouse.click(box.x + box.width / 2, box.y + box.height / 2);
     await sleep(100);
-    const v = await p.evaluate(() => ({ inside: document.querySelector('.card').contains(document.activeElement), pr: window.__starfield.state().pr, open: !document.querySelector('.card').hidden }));
-    check('a pull request card: tab never reaches the toggle, a click on it hands focus back to the card', where.every((x) => x === 'card') && v.inside && v.open && !!v.pr, JSON.stringify({ where, v }));
-    await p.keyboard.press('Escape');
-    await sleep(1500);
-    check('escape still closes the pull request card', (await p.evaluate(() => window.__starfield.state().pr)) === null);
+    const v = await p.evaluate(() => ({ repoOnly: window.__starfield.state().repoOnly, pressed: document.querySelector('.repo-only').getAttribute('aria-pressed'), pr: window.__starfield.state().pr, toggle: document.activeElement?.classList.contains('repo-only') }));
+    check('a pull request card: tab never reaches the toggle, a click where it sat never flips it and closes the card like the field', where.every((x) => x === 'card') && !v.repoOnly && v.pressed === 'false' && !v.toggle && v.pr === null, JSON.stringify({ where, v }));
     check('pull request toggle checks left the console clean', !l.length, l.join(' | '));
     await ctx.close();
   });
@@ -1726,9 +1790,514 @@ async function repoScopeChecks(gpu) {
       }
       const seen = samples.filter((x) => x !== null);
       check(`${vw}x${vh}: the open card never overlaps the browse group, flying to a lower left star and at rest`, seen.length > 20 && !seen.includes(true) && !!first && !!chained, `${seen.length} samples, first star ${JSON.stringify(first)}, chained ${JSON.stringify(chained)}`);
+      // the toggle flipped with the card open: one counter swaps for the other, the card keeps its size and place
+      const placed = () =>
+        p.evaluate(() => {
+          const c = document.querySelector('.card');
+          const r = c.getBoundingClientRect();
+          const ids = c.querySelector('.card-ids');
+          const shown = [...ids.querySelectorAll('[data-f="count"], [data-f="pos"]')].filter((el) => !el.hidden).map((el) => el.textContent);
+          return { r: [r.left, r.top, r.width, r.height], inside: r.left >= 0 && r.top >= 0 && r.right <= document.documentElement.clientWidth && r.bottom <= innerHeight, fits: ids.scrollWidth <= ids.clientWidth, shown };
+        });
+      // the pointer rests first and the click is programmatic, so the parallax holds still between the two reads
+      await p.mouse.move(vw / 2, vh / 3);
+      await sleep(1500);
+      const off = await placed();
+      await p.evaluate(() => document.querySelector('.repo-only').click());
+      await sleep(300);
+      const on = await placed();
+      const still = off.r.every((v, k) => near(v, on.r[k], 1));
+      check(`${vw}x${vh}: toggle on with the card open, the repo counter alone, the card in place, on screen and clear of the group`, off.shown.length === 1 && !off.shown[0].includes('in this repo') && on.shown.length === 1 && on.shown[0].endsWith('in this repo') && still && on.inside && on.fits && !(await overlap()), JSON.stringify({ off, on }));
       check(`${vw}x${vh} card and group checks left the console clean`, !l.length, l.join(' | '));
       await ctx.close();
     });
+  }
+}
+
+// a pull request card has no use for the browse group: it fades out as one unit with the readout's timing, out of
+// reach and the tab order, and comes back exactly as it was. a commit card keeps it
+async function prGroupChecks(gpu) {
+  const { page, context, logs } = await open(gpu, `${ORIGIN}/?debug&prs=mock`, { width: 1440, height: 900 });
+  await sceneReady(page);
+  await page.click('.mode-toggle');
+  await sleep(900);
+  await page.mouse.move(720, 600);
+  const group = () =>
+    page.evaluate(() => {
+      const g = document.querySelector('.browse-group');
+      const t = document.querySelector('.repo-only');
+      return {
+        opacity: Number(getComputedStyle(g).opacity),
+        readout: Number(getComputedStyle(document.querySelector('.readout')).opacity),
+        inert: g.inert,
+        faded: g.classList.contains('is-faded'),
+        pressed: t.getAttribute('aria-pressed'),
+        disabled: document.querySelector('.browse').disabled,
+        repoOnly: window.__starfield.state().repoOnly,
+        ui: getComputedStyle(document.querySelector('.stars-ui')).visibility,
+        pr: window.__starfield.state().pr,
+      };
+    });
+  // every way in: focus() on each control, counted by a focus listener, and what the pointer would hit at their centers
+  const reach = () =>
+    page.evaluate(() => {
+      let hits = 0;
+      const els = [document.querySelector('.browse'), document.querySelector('.repo-only')];
+      const count = () => hits++;
+      for (const el of els) {
+        el.addEventListener('focus', count);
+        el.focus();
+        el.removeEventListener('focus', count);
+      }
+      const under = els.some((el) => {
+        const r = el.getBoundingClientRect();
+        return document.elementFromPoint(r.x + r.width / 2, r.y + r.height / 2) === el;
+      });
+      return { focused: hits, under };
+    });
+  const center = (sel) => page.locator(sel).boundingBox().then((b) => ({ x: b.x + b.width / 2, y: b.y + b.height / 2 }));
+  // the group's controls in chromium's own accessibility tree, which assistive tech reads
+  const cdp = await context.newCDPSession(page);
+  const exposed = async () => (await cdp.send('Accessibility.getFullAXTree')).nodes.filter((n) => !n.ignored && n.role?.value === 'button' && /^(browse commits|this repo only)$/.test(n.name?.value ?? '')).length;
+  const flows = [
+    ['toggle off, closed by a click where browse sat', null, '.browse'],
+    ['toggle on, closed by a click where the toggle sat', 'on', '.repo-only'],
+    ['toggle on and a pin with nothing to browse, closed with escape', 'empty', null],
+  ];
+  for (const [name, setup, clickAt] of flows) {
+    if (setup === 'on') await page.click('.repo-only');
+    if (setup === 'empty') await page.evaluate(() => window.__starfield.pin(99));
+    await page.mouse.move(720, 600);
+    await sleep(300);
+    const before = await group();
+    const shown = await exposed();
+    const s = await catchableStreak(page);
+    if (!s) {
+      check(`browse group, ${name}: caught a streak`, false);
+      continue;
+    }
+    const at = clickAt && (await center(clickAt));
+    await page.mouse.click(s.screen.x, s.screen.y);
+    await sleep(200);
+    const mid = await group();
+    const flight = await reach();
+    await sleep(1600);
+    const gone = await group();
+    const open = await reach();
+    const aria = await exposed();
+    const tabs = [];
+    for (let k = 0; k < 6; k++) {
+      await page.keyboard.press('Tab');
+      tabs.push(await page.evaluate(() => (document.querySelector('.card').contains(document.activeElement) ? 'card' : document.activeElement?.className || document.activeElement?.tagName)));
+    }
+    check(`browse group, ${name}: fades out with the readout, a fade and not a snap`, mid.faded && mid.opacity > 0.05 && mid.opacity < 0.95 && mid.readout > 0.05 && mid.readout < 0.95 && gone.opacity === 0 && gone.readout === 0 && !!gone.pr, JSON.stringify({ mid, gone }));
+    check(`browse group, ${name}: out of reach from the click on: no focus, no hit, not in the accessibility tree or the tab cycle`, gone.inert && !flight.focused && !open.focused && !flight.under && !open.under && aria === 0 && shown > 0 && tabs.every((x) => x === 'card'), JSON.stringify({ flight, open, aria, shown, tabs }));
+    if (at) await page.mouse.click(at.x, at.y);
+    else await page.keyboard.press('Escape');
+    await sleep(250);
+    const midBack = await group();
+    await sleep(1300);
+    const back = await group();
+    const st = await state(page);
+    const same = ['pressed', 'disabled', 'repoOnly'].every((k) => back[k] === before[k]);
+    check(`browse group, ${name}: fades back in with the readout, pressed and disabled states exactly as before`, back.pr === null && midBack.opacity > 0.05 && midBack.opacity < 0.95 && back.opacity === 1 && back.readout === 1 && !back.inert && !back.faded && same && st.focus === -1, JSON.stringify({ before, midBack, back, focus: st.focus }));
+  }
+  await page.evaluate(() => window.__starfield.pin(null));
+  if ((await group()).pressed === 'true') await page.click('.repo-only');
+
+  // a pull request opened while focus sat in the group (a click with no press first): focus goes back to it on close
+  await page.focus('.browse');
+  const fs = await catchableStreak(page);
+  if (fs) {
+    await page.evaluate(() => {
+      const d = window.__starfield.streak().screen;
+      document.elementFromPoint(d.x, d.y).dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, clientX: d.x, clientY: d.y, button: 0 }));
+    });
+    await page.waitForFunction(() => !document.querySelector('.card').hidden && !window.__starfield.state().flying, null, { timeout: 6000 }).catch(() => {});
+    const during = await page.evaluate(() => document.querySelector('.card').contains(document.activeElement));
+    await page.keyboard.press('Escape');
+    await sleep(300);
+    const after = await page.evaluate(() => document.activeElement?.className);
+    check('browse group: a pull request opened from a focused browse button returns focus to it once the group is back', during && after === 'browse', `${during} ${after}`);
+  } else check('browse group: focus return (no catchable streak)', false);
+  await sleep(1300);
+
+  // a commit card keeps the group
+  await page.click('.browse');
+  await page.waitForFunction(() => window.__starfield.state().focus >= 0 && !window.__starfield.state().flying, null, { timeout: 4000 });
+  await page.mouse.move(720, 600);
+  const commit = await group();
+  check('browse group: a commit card leaves it in place and usable', commit.opacity === 1 && !commit.inert && !commit.faded && commit.readout === 1, JSON.stringify(commit));
+  await page.keyboard.press('Escape');
+  await sleep(1400);
+
+  // a peek from the page: the whole stars ui stays hidden, the group faded and inert with it, back after
+  await page.click('.mode-toggle');
+  await sleep(1500);
+  const ps = await catchableStreak(page);
+  if (ps) {
+    await page.mouse.click(ps.screen.x, ps.screen.y);
+    await sleep(1700);
+    const peek = await group();
+    const peekReach = await reach();
+    const readout = await page.evaluate(() => document.querySelector('.readout').classList.contains('is-faded'));
+    check('browse group: in a peek from the page the stars ui stays hidden, the group out of reach, the readout faded', peek.ui === 'hidden' && peek.inert && peek.faded && readout && !peekReach.focused && !peekReach.under && !!peek.pr, JSON.stringify({ peek, peekReach, readout }));
+    await page.keyboard.press('Escape');
+    await sleep(1600);
+    const after = await group();
+    check('browse group: after the peek it is restored and the stars ui stays hidden in text mode', !after.inert && !after.faded && after.ui === 'hidden' && after.pr === null, JSON.stringify(after));
+  } else check('browse group: peek from the page (no catchable streak)', false);
+  check('browse group checks left the console clean', !logs.length, logs.join(' | '));
+  await context.close();
+
+  // reduced motion: no fade
+  const r = await open(gpu, `${ORIGIN}/?debug`, { width: 1440, height: 900, reduced: true });
+  await sceneReady(r.page);
+  const t = await r.page.evaluate(() => getComputedStyle(document.querySelector('.browse-group')).transitionDuration);
+  check('browse group, reduced motion: no transition', t === '0s', t);
+  await r.context.close();
+}
+
+// streaks take the pointer only while no text mode dim is applied. under it they are decoration: no hover, no
+// slowdown, no cursor, and a click passes through to whatever is underneath
+async function catchChecks(gpu) {
+  // a test target laid under the streak's head and clicked there: whether it got the click, unprevented and bubbling
+  const clickThrough = (page) =>
+    page.evaluate(() => {
+      const d = window.__starfield.streak();
+      const { x, y } = d.screen;
+      const t = document.createElement('div');
+      t.style.cssText = `position:fixed;left:${x - 40}px;top:${y - 40}px;width:80px;height:80px;z-index:50`;
+      let got = null;
+      let bubbled = false;
+      const onDoc = () => (bubbled = true);
+      t.addEventListener('click', (e) => (got = { prevented: e.defaultPrevented }));
+      document.addEventListener('click', onDoc);
+      document.body.append(t);
+      const under = document.elementFromPoint(x, y) === t;
+      t.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, clientX: x, clientY: y, button: 0 }));
+      document.removeEventListener('click', onDoc);
+      t.remove();
+      return { under, got, bubbled, pr: window.__starfield.state().pr };
+    });
+  const hoverAt = async (page) => {
+    const at = await page.evaluate(() => window.__starfield.streak()?.screen);
+    if (at) await page.mouse.move(at.x, at.y);
+    await sleep(450);
+    return page.evaluate(() => {
+      const k = window.__starfield.streak();
+      return { hot: document.documentElement.classList.contains('is-catching'), cursor: getComputedStyle(document.body).cursor, speed: k?.timeScale ?? null, lift: k?.lift ?? null, catchable: window.__starfield.state().catchable };
+    });
+  };
+  const waitCatchable = (page, on, ms = 4000) => page.waitForFunction((v) => window.__starfield.state().catchable === v, on, { timeout: ms }).then(() => true).catch(() => false);
+  const gone = (page) => page.waitForFunction(() => !window.__starfield.streak(), null, { timeout: 9000 }).catch(() => {});
+
+  for (const [w, h] of [[1440, 900], [1024, 768]]) {
+    const tag = `catch ${w}x${h}`;
+    const { page, context, logs } = await open(gpu, `${ORIGIN}/?debug&prs=mock`, { width: w, height: h });
+    await sceneReady(page);
+    await page.mouse.move(5, h - 10);
+    await sleep(1200);
+    const about = await aboutY(page);
+
+    // the top: as before
+    let s = await catchableStreak(page);
+    if (s) {
+      const hot = await hoverAt(page);
+      check(`${tag}, top: a streak under the pointer is caught: hover class, pointer cursor, a quarter speed`, hot.catchable && hot.hot && hot.cursor === 'pointer' && hot.speed < 0.4 && hot.lift > 0.5, JSON.stringify(hot));
+      const top = await clickThrough(page);
+      check(`${tag}, top: a click on it belongs to the streak: the target underneath never sees it, the peek begins`, top.under && top.got === null && !top.bubbled && top.pr !== null, JSON.stringify(top));
+      await sleep(1700);
+      await page.keyboard.press('Escape');
+      await sleep(1600);
+      check(`${tag}: closing a peek begun at the top leaves streaks catchable`, (await state(page)).catchable && !(await page.evaluate(() => document.documentElement.classList.contains('is-peek'))));
+    } else check(`${tag}, top: caught a streak`, false);
+
+    // the content in view: decoration only
+    await page.mouse.move(5, h - 10);
+    await gone(page);
+    await page.evaluate((y) => window.scrollTo(0, y), about);
+    const off = await waitCatchable(page, false);
+    s = await catchableStreak(page, 6, false);
+    if (s && off) {
+      const cold = await hoverAt(page);
+      check(`${tag}, dimmed: a streak under the pointer is not caught: no hover class or pointer cursor, full speed, no lift`, !cold.catchable && !cold.hot && cold.cursor !== 'pointer' && cold.speed > 0.99 && cold.lift === 0, JSON.stringify(cold));
+      const through = await clickThrough(page);
+      check(`${tag}, dimmed: a click on it reaches the target underneath, not prevented, still bubbling, no card`, through.under && !!through.got && !through.got.prevented && through.bubbled && through.pr === null, JSON.stringify(through));
+      const head = await page.evaluate(() => window.__starfield.streak()?.screen);
+      if (head) await page.mouse.click(head.x, head.y);
+      await sleep(500);
+      const after = await page.evaluate(() => ({ pr: window.__starfield.state().pr, peek: document.documentElement.classList.contains('is-peek'), hot: document.documentElement.classList.contains('is-catching'), y: window.scrollY }));
+      check(`${tag}, dimmed: a real click on it opens nothing and the page stays where it was`, !!head && after.pr === null && !after.peek && !after.hot && after.y === about, JSON.stringify(after));
+    } else check(`${tag}, dimmed: a streak in view with the dim on`, false, `catchable off ${off}`);
+    check(`${tag} checks left the console clean`, !logs.length, logs.join(' | '));
+    await context.close();
+  }
+
+  const { page, context, logs } = await open(gpu, `${ORIGIN}/?debug&prs=mock`, { width: 1440, height: 900 });
+  await sceneReady(page);
+  await page.mouse.move(5, 890);
+  await sleep(1200);
+  const about = await aboutY(page);
+  const H = 900;
+  const ramp = (y) => {
+    const t = Math.min(1, Math.max(0, ((about - y) / H - 0.85) / (0.3 - 0.85)));
+    return t * t * (3 - 2 * t);
+  };
+  // every frame: scroll by step from one point to another, then hold for a second
+  const sweep = (from, to, step, wiggle = 0) =>
+    page.evaluate(
+      ({ from, to, step, wiggle }) =>
+        new Promise((res) => {
+          const out = [];
+          let y = from;
+          let k = 0;
+          const rec = () => {
+            const s = window.__starfield.state();
+            out.push({ y: window.scrollY, dim: s.dim, catchable: s.catchable });
+          };
+          const f = () => {
+            window.scrollTo(0, wiggle ? y + (k % 2 ? wiggle : -wiggle) : y);
+            rec();
+            k++;
+            if (wiggle ? k < 150 : step > 0 ? y < to : y > to) {
+              if (!wiggle) y = step > 0 ? Math.min(to, y + step) : Math.max(to, y + step);
+              requestAnimationFrame(f);
+            } else {
+              let n = 0;
+              const g = () => (rec(), ++n < 60 ? requestAnimationFrame(g) : res(out));
+              requestAnimationFrame(g);
+            }
+          };
+          requestAnimationFrame(f);
+        }),
+      { from, to, step, wiggle }
+    );
+  // the gate as a pure function of the dim it saw: off above release, on below rearm, held in between
+  const lawful = (list) => list.every((f, i) => (f.dim > 0.04 ? !f.catchable : f.dim < 0.02 ? f.catchable : i === 0 || f.catchable === list[i - 1].catchable));
+  const flips = (list) => list.slice(1).filter((f, i) => f.catchable !== list[i].catchable).length;
+  const settle = Math.round(about - 0.3 * H);
+  const down = await sweep(0, settle, 3);
+  const k = down.findIndex((f) => !f.catchable);
+  const sw = down[k];
+  check('catch: a slow scroll into the content turns streaks off once, as the dim passes 0.04, early in the ramp', lawful(down) && flips(down) === 1 && sw && sw.dim > 0.04 && down[k - 1].dim <= 0.04 && ramp(sw.y) > 0 && ramp(sw.y) < 0.25, sw ? `${down.length} frames, off at scroll ${sw.y} (dim begins at ${Math.round(about - 0.85 * H)}), dim ${sw.dim.toFixed(4)}, ramp there ${ramp(sw.y).toFixed(3)}` : 'never turned off');
+  const up = await sweep(settle, 0, -3);
+  const j = up.findIndex((f) => f.catchable);
+  check('catch: a slow scroll back up turns them on once, as the dim falls under 0.02', lawful(up) && flips(up) === 1 && j > 0 && up[j].dim < 0.02 && up[j - 1].dim >= 0.02, j > 0 ? `on at scroll ${up[j].y}, dim ${up[j].dim.toFixed(4)}` : 'never turned on');
+  // hovering at the line: a scroll jittering where the ramp asks for 0.03, coming from either side, never flips
+  let lo = 0;
+  let hi = 1;
+  for (let n = 0; n < 40; n++) {
+    const m = (lo + hi) / 2;
+    const v = m * m * (3 - 2 * m);
+    if (v < 0.03) lo = m;
+    else hi = m;
+  }
+  const line = Math.round(about - (0.85 - lo * 0.55) * H);
+  const fromTop = await sweep(line, line, 0, 4);
+  await page.evaluate((y) => window.scrollTo(0, y), about);
+  await waitCatchable(page, false);
+  await sleep(1500);
+  const fromBelow = await sweep(line, line, 0, 4);
+  check('catch: jittering across the line from the top or from the content never flickers', lawful(fromTop) && lawful(fromBelow) && flips(fromTop) === 0 && flips(fromBelow) === 0 && fromTop.every((f) => f.catchable) && fromBelow.every((f) => !f.catchable), `line at ${line}, dims ${Math.min(...fromTop.map((f) => f.dim)).toFixed(3)} to ${Math.max(...fromTop.map((f) => f.dim)).toFixed(3)} and ${Math.min(...fromBelow.map((f) => f.dim)).toFixed(3)} to ${Math.max(...fromBelow.map((f) => f.dim)).toFixed(3)}`);
+
+  // a caught streak scrolled into the dim lets go cleanly, and the pointer takes one again back at the top
+  await page.evaluate(() => window.scrollTo(0, 0));
+  await waitCatchable(page, true);
+  await gone(page);
+  let s = await catchableStreak(page);
+  if (s) {
+    const hot = await hoverAt(page);
+    await page.evaluate((y) => window.scrollTo(0, y), about);
+    await sleep(600);
+    const freed = await page.evaluate(() => {
+      const k = window.__starfield.streak();
+      return { hot: document.documentElement.classList.contains('is-catching'), cursor: getComputedStyle(document.body).cursor, speed: k?.timeScale ?? null, lift: k?.lift ?? null, focused: k?.focused ?? null };
+    });
+    check('catch: a streak caught at the top and scrolled into the dim lets go: full speed, no lift, class or cursor', hot.hot && !freed.hot && freed.cursor !== 'pointer' && (freed.speed === null || (freed.speed > 0.99 && freed.lift < 0.01 && !freed.focused)), JSON.stringify({ hot, freed }));
+    await page.evaluate(() => window.scrollTo(0, 0));
+    await waitCatchable(page, true);
+    s = await catchableStreak(page);
+    const again = s ? await hoverAt(page) : null;
+    check('catch: back at the top a streak is caught again from the next pointer move', !!again && again.hot && again.speed < 0.4, JSON.stringify(again));
+  } else check('catch: release while scrolling (no catchable streak)', false);
+
+  // the 0 key, the home key and stars mode begun from the content all bring them back
+  await page.mouse.move(5, 890);
+  for (const key of ['0', 'Home']) {
+    await page.evaluate((y) => window.scrollTo(0, y), about);
+    const wasOff = await waitCatchable(page, false);
+    await page.evaluate(() => document.activeElement?.blur());
+    await page.keyboard.press(key);
+    const on = await waitCatchable(page, true, 5000);
+    const st = await state(page);
+    check(`catch: the ${key} key back to the top makes streaks catchable again once the dim is under 0.02`, wasOff && on && st.dim < 0.02, `dim ${st.dim.toFixed(4)}`);
+  }
+  await page.evaluate((y) => window.scrollTo(0, y), about);
+  await waitCatchable(page, false);
+  await gone(page);
+  await page.click('.mode-toggle');
+  const starsOn = await waitCatchable(page, true, 3000);
+  const ss = await state(page);
+  check('catch: stars mode begun from the content makes them catchable as the dim fades out with the mode', starsOn && ss.dim < 0.02 && ss.mode === 'stars', `dim ${ss.dim.toFixed(4)}`);
+  await sleep(900);
+  s = await catchableStreak(page);
+  if (s) {
+    const hot = await hoverAt(page);
+    const head = await page.evaluate(() => window.__starfield.streak().screen);
+    await page.mouse.click(head.x, head.y);
+    await sleep(1700);
+    const card = await page.evaluate(() => ({ pr: window.__starfield.state().pr, open: !document.querySelector('.card').hidden, kind: document.querySelector('.card').classList.contains('is-pr') }));
+    check('catch: in stars mode a streak is caught and opens its card as before', hot.hot && hot.speed < 0.4 && !!card.pr && card.open && card.kind, JSON.stringify({ hot, card }));
+    await page.keyboard.press('Escape');
+    await sleep(1500);
+  } else check('catch: stars mode streak (no catchable streak)', false);
+  check('catch checks left the console clean', !logs.length, logs.join(' | '));
+  await context.close();
+}
+
+// the tree before a change, served next to this one, for what must not change: CHECK_BASELINE=<a copy of the repo>
+const CHROME = 'main, .site-footer, .topbar, .orbit, .stars-ui, .skip, .card, .card-tether, .focus-pulse, .star-ring { visibility: hidden !important }';
+
+// one canvas frame with the page's chrome hidden, on a fake clock and a seeded random, so two trees given the same
+// steps draw the same pixels
+async function canvasFrame(gpu, origin, steps) {
+  const context = await gpu.newContext({ viewport: { width: 1440, height: 900 }, deviceScaleFactor: 1 });
+  await context.addInitScript(() => {
+    let seed = 12345;
+    Math.random = () => (seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0) / 4294967296;
+  });
+  await context.clock.install({ time: 1_800_000_000_000 });
+  await context.clock.pauseAt(1_800_000_001_000);
+  const page = await context.newPage();
+  await page.goto(`${origin}/?debug&prs=mock`, { waitUntil: 'networkidle' });
+  await sceneReady(page);
+  await context.clock.runFor(3000);
+  const info = await steps(page, context.clock);
+  await page.addStyleTag({ content: CHROME });
+  await context.clock.runFor(100);
+  await sleep(200);
+  const png = await page.screenshot();
+  await context.close();
+  return { png, info };
+}
+
+// channels that differ between two screenshots, and the largest difference
+async function pixelDiff(gpu, a, b) {
+  const probe = await gpu.newPage();
+  const d = await probe.evaluate(
+    async (srcs) => {
+      const data = await Promise.all(
+        srcs.map(async (src) => {
+          const img = new Image();
+          img.src = src;
+          await img.decode();
+          const c = document.createElement('canvas');
+          c.width = img.width;
+          c.height = img.height;
+          const g = c.getContext('2d');
+          g.drawImage(img, 0, 0);
+          return g.getImageData(0, 0, c.width, c.height).data;
+        })
+      );
+      let n = 0;
+      let max = 0;
+      let lit = 0;
+      for (let i = 0; i < data[0].length; i++) {
+        const v = Math.abs(data[0][i] - data[1][i]);
+        if (v) n++;
+        if (v > max) max = v;
+        lit += data[0][i];
+      }
+      return { n, max, lit };
+    },
+    [a, b].map((png) => `data:image/png;base64,${png.toString('base64')}`)
+  );
+  await probe.close();
+  return d;
+}
+
+async function baselineChecks(gpu) {
+  const dir = process.env.CHECK_BASELINE;
+  if (!dir) return check('baseline: CHECK_BASELINE names a copy of the tree to compare against', false);
+  const { startServer: serveBaseline } = await import(pathToFileURL(path.join(path.resolve(dir), 'tools', 'serve.mjs')).href);
+  const other = await serveBaseline(PORT + 1);
+  const BASE = `http://localhost:${PORT + 1}`;
+  try {
+    const clickHead = async (page, clock) => {
+      await page.evaluate(() => window.__starfield.fireStreak());
+      await clock.runFor(1200);
+      const s = await page.evaluate(() => window.__starfield.streak().screen);
+      await page.mouse.click(s.x, s.y);
+      await clock.runFor(2500);
+      return page.evaluate(() => ({ pr: window.__starfield.state().pr, k: window.__starfield.streak() }));
+    };
+    const toStars = async (page, clock) => {
+      await page.click('.mode-toggle');
+      await clock.runFor(2000);
+    };
+    const scenes = [
+      ['the field at the hero', async () => null],
+      ['a streak in flight at the hero', async (page, clock) => (await page.evaluate(() => window.__starfield.fireStreak()), await clock.runFor(1500), page.evaluate(() => window.__starfield.streak()))],
+      ['a paused streak under its card, from the hero', clickHead],
+      ['the field in stars mode', toStars],
+      ['a paused streak under its card in stars mode', async (page, clock) => (await toStars(page, clock), clickHead(page, clock))],
+    ];
+    for (const [name, steps] of scenes) {
+      let a;
+      let b;
+      let d;
+      // one retake: the gpu has been seen to differ by a level or two on a few hundred pixels once in a while
+      for (let k = 0; k < 2 && !(d && d.n === 0); k++) {
+        a = await canvasFrame(gpu, ORIGIN, steps);
+        b = await canvasFrame(gpu, BASE, steps);
+        d = await pixelDiff(gpu, a.png, b.png);
+      }
+      const paused = name.includes('paused') ? !!a.info?.pr && a.info.k?.focused && a.info.k.dim === 0 : true;
+      check(`baseline: ${name} is pixel identical to the baseline tree`, d.n === 0 && d.lit > 0 && paused, `${d.n} channels differ, largest ${d.max}${a.info ? `, ${JSON.stringify(a.info.k ? { p: a.info.k.p, focused: a.info.k.focused, dim: a.info.k.dim } : a.info)}` : ''}`);
+    }
+
+    // the dim over the middle third, and the presentation of the stars ui, against the baseline tree
+    const look = async (origin) => {
+      const { page, context } = await open(gpu, `${origin}/?debug`, { width: 1440, height: 900, reduced: true });
+      await sceneReady(page);
+      await sleep(800);
+      await page.evaluate((y) => window.scrollTo(0, y), await aboutY(page));
+      await frames(page);
+      const lit = await fieldStrips(page, gpu);
+      await page.evaluate(() => window.__starfield.forceDim(0));
+      await frames(page);
+      const base = await fieldStrips(page, gpu);
+      await page.evaluate(() => {
+        window.__starfield.forceDim(null);
+        window.scrollTo(0, 0);
+      });
+      await page.click('.mode-toggle');
+      await sleep(600);
+      await page.mouse.move(720, 450);
+      const ui = await page.evaluate(() => {
+        const box = (el) => { const r = el.getBoundingClientRect(); return [r.x, r.y, r.width, r.height]; };
+        const pick = (el, keys) => keys.map((k) => getComputedStyle(el)[k]).join('|');
+        const b = document.querySelector('.browse');
+        const t = document.querySelector('.repo-only');
+        return {
+          browse: { box: box(b), style: pick(b, ['color', 'font', 'padding', 'letterSpacing', 'opacity']), text: b.textContent },
+          toggle: { box: box(t), style: pick(t, ['color', 'font', 'padding', 'letterSpacing', 'borderTopWidth', 'borderRadius']) },
+        };
+      });
+      await context.close();
+      return { lit, base, ui };
+    };
+    const cur = await look(ORIGIN);
+    const was = await look(BASE);
+    const third = middle(cur.lit) / middle(was.lit);
+    const undimmed = cur.base.reduce((m, v, i) => Math.max(m, Math.abs(v - was.base[i]) / Math.max(1, was.base[i])), 0);
+    check('baseline: with about in view the middle third is as dim as in the baseline tree, and the undimmed field is the same', near(third, 1, 0.01) && undimmed < 0.002, `middle third ${third.toFixed(4)} of the baseline's, undimmed strips within ${(undimmed * 100).toFixed(3)}%`);
+    const within = (p, q) => p.every((v, i) => near(v, q[i], 1));
+    check('baseline: the browse button is unchanged', within(cur.ui.browse.box, was.ui.browse.box) && cur.ui.browse.style === was.ui.browse.style && cur.ui.browse.text === was.ui.browse.text, JSON.stringify({ now: cur.ui.browse, was: was.ui.browse }));
+    check('baseline: the toggle keeps its box, place, font, padding and color, its border width kept as space', within(cur.ui.toggle.box, was.ui.toggle.box) && cur.ui.toggle.style === was.ui.toggle.style, JSON.stringify({ now: cur.ui.toggle, was: was.ui.toggle }));
+  } finally {
+    other.close();
   }
 }
 
@@ -2608,8 +3177,9 @@ async function settled(page) {
   }
 }
 
-// fire a streak and wait until its head sits somewhere clickable
-async function catchableStreak(page, tries = 6) {
+// fire a streak and wait until its head sits somewhere clickable and, unless live is false, the scene lets the
+// pointer catch it (no text mode dim)
+async function catchableStreak(page, tries = 6, live = true) {
   for (let k = 0; k < tries; k++) {
     let fired = false;
     for (let w = 0; w < 24 && !fired; w++) {
@@ -2619,13 +3189,13 @@ async function catchableStreak(page, tries = 6) {
     if (!fired) return null;
     for (let w = 0; w < 30; w++) {
       await sleep(100);
-      const s = await page.evaluate((ignored) => {
+      const s = await page.evaluate(({ ignored, live }) => {
         const d = window.__starfield.streak();
         if (!d) return null;
         const under = document.elementFromPoint(d.screen.x, d.screen.y);
-        const ok = d.p > 0.08 && d.p < 0.6 && d.screen.y > 110 && d.screen.x > 60 && d.screen.x < innerWidth - 60 && under && !under.closest(ignored);
+        const ok = d.p > 0.08 && d.p < 0.6 && d.screen.y > 110 && d.screen.x > 60 && d.screen.x < innerWidth - 60 && under && !under.closest(ignored) && (!live || window.__starfield.state().catchable);
         return ok ? d : null;
-      }, IGNORED);
+      }, { ignored: IGNORED, live });
       if (s) return s;
     }
     await page.waitForFunction(() => !window.__starfield.streak(), null, { timeout: 8000 }).catch(() => {});
@@ -2644,6 +3214,8 @@ async function streakSpeed(page) {
 }
 
 const near = (a, b, eps) => Math.abs(a - b) <= eps;
+// a scroll short of where the dim begins at 1440x900 (about 135px), where a page streak can still be caught
+const PEEK_Y = 100;
 
 // item 2: pull request data, gold streaks in the scene, the pr card, and exact returns
 async function prChecks(gpu) {
@@ -2683,10 +3255,11 @@ async function prChecks(gpu) {
   const caught = await streakSpeed(page);
   check('hovering a streak catches it at about quarter speed', hot && caught < free * 0.4 && caught > free * 0.1, `free ${free.toFixed(0)}px/s, caught ${caught.toFixed(0)}px/s`);
 
-  // text mode context at scrollY 1200, closed with escape
+  // text mode context at a small scroll, above where the dim begins (a dimmed streak cannot be caught), closed with
+  // escape
   await page.mouse.move(5, 890);
   await page.waitForFunction(() => !window.__starfield.streak(), null, { timeout: 8000 }).catch(() => {});
-  await page.evaluate(() => window.scrollTo(0, 1200));
+  await page.evaluate((y) => window.scrollTo(0, y), PEEK_Y);
   await settled(page);
   const before = await state(page);
   s = await catchableStreak(page);
@@ -2735,7 +3308,7 @@ async function prChecks(gpu) {
   check('pr card hides the hash chip, counters, prev, next and the language dot', !cardInfo.hash && !cardInfo.steps && !cardInfo.lang);
   check('pr card shows the org logo when one exists', pr.logo ? cardInfo.logo : !cardInfo.logo);
   check('pr card is labelled by its title and announced', cardInfo.labelled === cardInfo.title && cardInfo.live.includes(`${pr.owner}/${pr.repo}`) && cardInfo.live.includes(pr.title) && (pr.merged ? cardInfo.live.includes('merged') : cardInfo.live.includes('open since')));
-  check('from the page it is a peek: page hidden, scroll kept, toggle reads back to page', cardInfo.peek && cardInfo.y === 1200 && cardInfo.label === 'back to page');
+  check('from the page it is a peek: page hidden, scroll kept, toggle reads back to page', cardInfo.peek && cardInfo.y === PEEK_Y && cardInfo.label === 'back to page');
   await page.mouse.move(1000, 300);
   await sleep(500);
   await page.screenshot({ path: `${OUT}/pr-card-${pr.merged ? 'merged' : 'open'}.png` });
@@ -2749,7 +3322,7 @@ async function prChecks(gpu) {
     inert: document.querySelector('main').inert,
     label: document.querySelector('.mode-label').textContent,
   }));
-  check('escape returns to the text context: same scroll, page back, nothing inert', back.y === 1200 && !back.peek && back.opacity === '1' && !back.inert && back.label === 'stars only', JSON.stringify(back));
+  check('escape returns to the text context: same scroll, page back, nothing inert', back.y === PEEK_Y && !back.peek && back.opacity === '1' && !back.inert && back.label === 'stars only', JSON.stringify(back));
   check('text context look restored: camera, focal, intensity, nebula', near(st.cam.x, before.cam.x, 0.01) && near(st.cam.y, before.cam.y, 0.01) && near(st.cam.z, before.cam.z, 0.01) && near(st.focal, before.focal, 0.005) && near(st.intensity, before.intensity, 0.005) && st.nebula === 0 && st.mode === 'content', JSON.stringify({ before: [before.focal, before.intensity, before.nebula], after: [st.focal, st.intensity, st.nebula] }));
   const resumed = await page.evaluate(() => window.__starfield.streak());
   const onLine = (h) => {
@@ -2800,7 +3373,7 @@ async function prChecks(gpu) {
   await page.click('.mode-toggle');
   await sleep(1200);
   for (const how of ['toggle', 'close button']) {
-    await page.evaluate(() => window.scrollTo(0, 600));
+    await page.evaluate((y) => window.scrollTo(0, y), PEEK_Y / 2);
     await settled(page);
     const ref = await state(page);
     await page.waitForFunction(() => !window.__starfield.streak(), null, { timeout: 8000 }).catch(() => {});
@@ -2812,7 +3385,7 @@ async function prChecks(gpu) {
     await sleep(1700);
     st = await state(page);
     const y = await page.evaluate(() => window.scrollY);
-    check(`text mode, ${how}: back at the same scroll with the same look`, y === 600 && near(st.cam.z, ref.cam.z, 0.01) && near(st.intensity, ref.intensity, 0.01) && near(st.focal, ref.focal, 0.01) && st.nebula === 0, `y ${y}, focal ${ref.focal.toFixed(3)} -> ${st.focal.toFixed(3)}`);
+    check(`text mode, ${how}: back at the same scroll with the same look`, y === PEEK_Y / 2 && near(st.cam.z, ref.cam.z, 0.01) && near(st.intensity, ref.intensity, 0.01) && near(st.focal, ref.focal, 0.01) && st.nebula === 0, `y ${y}, focal ${ref.focal.toFixed(3)} -> ${st.focal.toFixed(3)}`);
   }
   check('pr checks left the console clean', !logs.length, logs.join(' | '));
   await context.close();
@@ -3891,7 +4464,7 @@ async function fieldStrips(page, gpu) {
 }
 
 const sum = (a, from, to) => a.slice(from, to).reduce((s, v) => s + v, 0);
-// light in the outer edge strips (beyond the column's feather) and in the middle third
+// light in the outer edge strips and in the middle third
 const edges = (a) => sum(a, 0, 3) + sum(a, STRIPS - 3, STRIPS);
 const middle = (a) => sum(a, STRIPS / 3, (2 * STRIPS) / 3);
 
@@ -3905,7 +4478,7 @@ const rampAt = (page) =>
 
 const aboutY = (page) => page.evaluate(() => Math.round(document.querySelector('main .section').getBoundingClientRect().top + scrollY));
 
-// item 1: text mode dims the field and the streaks a little behind the content column, only below the hero
+// item 1: text mode dims the field and the streaks a little, evenly across the screen, only below the hero
 async function dimChecks(gpu) {
   // pixels: a still field, measured with and without the dim at the same scroll position
   {
@@ -3934,13 +4507,16 @@ async function dimChecks(gpu) {
     await frames(page);
     const mid = middle(lit) / middle(base);
     const edge = edges(lit) / edges(base);
-    const want = 1 - s.column.field;
-    check('dim: with about in view the middle third loses about the configured amount and the edges keep theirs', near(mid, want, 0.04) && near(edge, 1, 0.015) && s.dim === 1, `middle ${mid.toFixed(3)} (want ${want.toFixed(2)}), edges ${edge.toFixed(3)}, column ${s.column.left.toFixed(3)} to ${s.column.right.toFixed(3)}, feather ${s.column.feather}`);
-    // the profile, strip by strip: full over the column, easing out across the feather, nothing at the sides
-    const ratios = lit.map((v, i) => (base[i] > 2000 ? v / base[i] : null));
-    const inner = ratios.filter((r, i) => r !== null && (i + 0.5) / STRIPS > s.column.left + s.column.feather / 2 && (i + 0.5) / STRIPS < s.column.right - s.column.feather / 2);
-    const outer = ratios.filter((r, i) => r !== null && ((i + 1) / STRIPS < s.column.left - s.column.feather / 2 || i / STRIPS > s.column.right + s.column.feather / 2));
-    check('dim: strip by strip the field is evenly dim over the column and untouched past its feather', inner.length > 20 && inner.every((r) => near(r, want, 0.06)) && outer.every((r) => near(r, 1, 0.02)), `column strips ${Math.min(...inner).toFixed(3)} to ${Math.max(...inner).toFixed(3)}, outer strips ${outer.map((r) => r.toFixed(3)).join(' ')}`);
+    const want = 1 - s.strength.field;
+    check('dim: with about in view the middle third loses the configured amount and the edges the same', near(mid, want, 0.045) && near(edge, mid, 0.04) && s.dim === 1, `middle ${mid.toFixed(3)}, edges ${edge.toFixed(3)} (want ${want.toFixed(2)})`);
+    // strip by strip across the whole width, the outermost lit strips included: no horizontal shape. strips holding
+    // little light read a little low (haze near the background rounds away), so each is held to the strips' median;
+    // the old column falloff left the sides near 1
+    const ratios = lit.map((v, i) => (base[i] > 10000 ? v / base[i] : null));
+    const kept = ratios.filter((r) => r !== null);
+    const median = [...kept].sort((p, q) => p - q)[kept.length >> 1];
+    const ends = [ratios.find((r) => r !== null), ratios.findLast((r) => r !== null)];
+    check('dim: strip by strip the field is evenly dim across the whole width, edge to edge', kept.length > 36 && kept.every((r) => near(r, median, 0.05)) && ends.every((r) => near(r, median, 0.05)), `${kept.length} strips from ${Math.min(...kept).toFixed(3)} to ${Math.max(...kept).toFixed(3)}, median ${median.toFixed(3)}, outermost ${ends.map((r) => r.toFixed(3)).join(' ')}`);
 
     // reduced motion: no temporal ease, still scroll linked
     await page.evaluate(() => window.scrollTo(0, 0));
@@ -4061,18 +4637,25 @@ async function dimChecks(gpu) {
     const exited = !(await page.evaluate(() => document.documentElement.classList.contains('is-stars')));
     check('dim: the overscroll exit returns to the top with no dim popping in', exited && Math.max(...f.map((x) => x.dim)) < 0.01, `exited ${exited}, largest dim ${Math.max(...f.map((x) => x.dim)).toFixed(4)}`);
 
-    // streaks: their own strength, lifted by hover and by an open card, gone in a peek
+    // streaks: their own strength, and under the dim no hover lift (a dimmed streak is not caught); a peek only begins
+    // at the top, where the paused streak under its card is at full brightness
     await page.evaluate((y) => window.scrollTo({ top: y, behavior: 'instant' }), about);
     await sleep(1800);
-    const sk = await catchableStreak(page);
+    const sk = await catchableStreak(page, 6, false);
     if (sk) {
       const free = await page.evaluate(() => ({ s: window.__starfield.state(), k: window.__starfield.streak() }));
-      check('dim: a free streak carries its own strength, the same scroll amount and the shared column', near(free.k.dim, free.s.dim * free.s.column.streak, 0.01) && free.s.column.streak > free.s.column.field, `streak ${free.k.dim.toFixed(3)} for dim ${free.s.dim.toFixed(3)} x ${free.s.column.streak}`);
+      check('dim: a free streak carries its own strength of the same scroll amount', near(free.k.dim, free.s.dim * free.s.strength.streak, 0.01) && free.s.strength.streak > free.s.strength.field, `streak ${free.k.dim.toFixed(3)} for dim ${free.s.dim.toFixed(3)} x ${free.s.strength.streak}`);
       const at = await page.evaluate(() => window.__starfield.streak().screen);
       await page.mouse.move(at.x, at.y);
       await sleep(550);
-      const hovered = await page.evaluate(() => window.__starfield.streak());
-      check('dim: a streak under the pointer is back at full brightness', hovered && hovered.timeScale < 0.5 && hovered.dim < 0.01, hovered ? `dim ${hovered.dim.toFixed(4)}, lift ${hovered.lift.toFixed(3)}, speed ${hovered.timeScale.toFixed(2)}` : 'streak gone');
+      const hovered = await page.evaluate(() => window.__starfield.streak() && { ...window.__starfield.streak(), hot: document.documentElement.classList.contains('is-catching') });
+      check('dim: a streak under the pointer stays dimmed at full speed, not caught', !!hovered && !hovered.hot && hovered.timeScale > 0.99 && hovered.lift === 0 && near(hovered.dim, free.k.dim, 0.01), hovered ? `dim ${hovered.dim.toFixed(4)}, lift ${hovered.lift.toFixed(3)}, speed ${hovered.timeScale.toFixed(2)}` : 'streak gone');
+    } else check('dim: streak checks (no streak in view)', false);
+    await page.mouse.move(5, 890);
+    await page.evaluate(() => window.scrollTo({ top: 0, behavior: 'instant' }));
+    await page.waitForFunction(() => window.__starfield.state().catchable && !window.__starfield.streak(), null, { timeout: 9000 }).catch(() => {});
+    const top = await catchableStreak(page);
+    if (top) {
       rec = track(page, 2000);
       await sleep(30);
       const head = await page.evaluate(() => window.__starfield.streak()?.screen);
@@ -4080,13 +4663,13 @@ async function dimChecks(gpu) {
       f = await rec;
       await sleep(600);
       const peek = await page.evaluate(() => ({ s: window.__starfield.state(), k: window.__starfield.streak(), peek: document.documentElement.classList.contains('is-peek') }));
-      check('dim: a peek from a scrolled page fades it out smoothly; the paused streak under its card is at full brightness', peek.peek && peek.s.dim === 0 && peek.k.focused && peek.k.dim === 0 && largestStep(f, (x) => x.dim) < 0.08, `dim ${peek.s.dim}, streak ${peek.k.dim}, largest step ${largestStep(f, (x) => x.dim).toFixed(3)}`);
+      check('dim: a peek from the top keeps it at 0; the paused streak under its card is at full brightness', peek.peek && peek.s.dim === 0 && peek.k.focused && peek.k.dim === 0 && Math.max(...f.map((x) => x.dim)) < 0.01, `dim ${peek.s.dim}, streak ${peek.k.dim}, largest ${Math.max(...f.map((x) => x.dim)).toFixed(4)}`);
       rec = track(page, 2600);
       await sleep(30);
       await page.keyboard.press('Escape');
       f = await rec;
-      check('dim: closing the peek brings it back with the page, no pop', largestStep(f, (x) => x.dim) < 0.08 && f.at(-1).dim > 0.97, `largest step ${largestStep(f, (x) => x.dim).toFixed(3)}, end ${f.at(-1).dim.toFixed(3)}`);
-    } else check('dim: streak checks (no catchable streak)', false);
+      check('dim: closing the peek at the top brings no dim back, streaks stay catchable', Math.max(...f.map((x) => x.dim)) < 0.01 && (await state(page)).catchable, `largest ${Math.max(...f.map((x) => x.dim)).toFixed(4)}`);
+    } else check('dim: peek from the top (no catchable streak)', false);
     check('dim motion checks left the console clean', !logs.length, logs.join(' | '));
     await context.close();
   }
@@ -4588,6 +5171,7 @@ try {
   if (want('browse')) {
     await browseChecks(gpu);
     await repoScopeChecks(gpu);
+    await prGroupChecks(gpu);
   }
   if (want('narrow')) await narrowChecks(gpu);
   if (want('cardlayout')) await cardLayoutChecks(gpu);
@@ -4604,10 +5188,12 @@ try {
   if (want('breakpoint')) await breakpointChecks(gpu);
   if (want('fixes')) await fixesChecks(gpu);
   if (want('dim')) await dimChecks(gpu);
+  if (want('catch')) await catchChecks(gpu);
   if (want('readout')) await readoutChecks(gpu);
   if (want('keys')) await keysChecks(gpu);
   if (want('serve')) await serveChecks();
   if (want('print')) await printChecks(gpu);
+  if (wantBaseline) await baselineChecks(gpu);
   if (wantLive) await liveChecks(gpu);
 } finally {
   await gpu.close();
