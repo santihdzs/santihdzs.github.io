@@ -315,9 +315,9 @@ async function interactChecks(gpu) {
       await sleep(1500);
       s = await state(page);
       const msg = await page.locator('.card-msg').textContent();
-      const sameRepo = data.commits[from][0] === data.commits[s.focus][0];
-      const later = which === 1 ? data.commits[s.focus][2] >= data.commits[from][2] : data.commits[s.focus][2] <= data.commits[from][2];
-      check(`card ${which ? 'next' : 'prev'} steps within the repo`, s.focus !== from && sameRepo && later && msg === data.commits[s.focus][6]);
+      // the repo toggle is off by default: the buttons step like the arrow keys, to the nearest commit overall
+      const want = which === 1 ? from - 1 : from + 1;
+      check(`card ${which ? 'next' : 'prev'} steps to the nearest commit overall, repo toggle off`, s.focus === want && msg === data.commits[want][6], `${from} -> ${s.focus}`);
     } else {
       check('card prev or next available', false, 'single commit repo picked');
     }
@@ -357,12 +357,13 @@ async function interactChecks(gpu) {
   await sleep(1400);
   s = await state(page);
   check('right arrow steps forward again', s.focus === 0);
+  // the stars ui's repo toggle joins a commit card's tab cycle
   const trap = [];
   for (let i = 0; i < 6; i++) {
     await page.keyboard.press('Tab');
-    trap.push(await page.evaluate(() => document.querySelector('.card').contains(document.activeElement)));
+    trap.push(await page.evaluate(() => (document.querySelector('.card').contains(document.activeElement) ? 'card' : document.activeElement?.classList.contains('repo-only') ? 'toggle' : 'out')));
   }
-  check('focus stays trapped in the card', trap.every(Boolean));
+  check('focus stays trapped in the card and its repo toggle', !trap.includes('out') && trap.includes('toggle'), trap.join(','));
   await page.keyboard.press('Escape');
   await sleep(1300);
   check('closing returns focus to the browse control', await page.evaluate(() => document.activeElement?.classList.contains('browse')));
@@ -1170,7 +1171,8 @@ async function browseChecks(gpu) {
     for (let k = t - 2; k >= 0; k--) await press('ArrowRight', list[k]);
     c = await press('ArrowRight', list[0]);
     check(`arrow keys, ${name} pinned: back up to the newest and stopping there`, c.focus === list[0] && c.count === `${t} of ${t}`, JSON.stringify(c));
-    // prev and next walk one repo; they never leave the pinned language and turn off at its ends
+    // with the repo toggle off (the default) prev walks what the arrow keys walk: every pinned commit, across
+    // repos, turning off at the oldest
     const walked = [];
     for (let k = 0; k < t && !(await card()).prev; k++) {
       const before = (await card()).focus;
@@ -1179,20 +1181,22 @@ async function browseChecks(gpu) {
       walked.push((await card()).focus);
     }
     c = await card();
-    check(`prev and next, ${name} pinned: stay inside ${name}, one repo, and disable at its oldest`, walked.every((i) => langs[i] === lang) && c.prev === true, `${walked.join(',')} prev disabled ${c.prev}`);
+    check(`prev, ${name} pinned, repo toggle off: the arrow keys' commits, across repos, disabling at the oldest ${name} commit`, walked.join() === list.slice(1).join() && c.prev === true && c.focus === list[t - 1], `${walked.join(',')} prev disabled ${c.prev}`);
     if (lang === 5) {
       // a pin change under the open card: it stays put, the count follows the new set, steps go to the nearest one
       const before = await card();
       await pinLegend(0);
       const after = await card();
       check('a pin change keeps the open card where it is and in place', after.focus === before.focus && after.rect === before.rect && (await page.locator('.card').isVisible()), `${before.rect} -> ${after.rect}`);
-      check('outside the new pin, the open card hides its n of total and turns prev and next off', after.count === null && after.pos === before.pos && after.prev && after.next && after.browseFilter === 0, JSON.stringify(after));
+      // repo toggle off: prev and next turn off only where the new pin has nothing further in that direction
+      const older = langs.findIndex((l, i) => i > after.focus && l === 0);
+      const newer = langs.findLastIndex((l, i) => i < after.focus && l === 0);
+      check('outside the new pin, the open card hides its n of total; prev and next follow the new pin across repos', after.count === null && after.pos === before.pos && after.prev === older < 0 && after.next === newer < 0 && after.browseFilter === 0, JSON.stringify(after));
       await page.hover('.legend-dot[data-lang="5"]');
       await sleep(200);
       const hovered = await card();
       check('a legend hover only previews: browsing still follows the pin', hovered.filter === 5 && hovered.browseFilter === 0, JSON.stringify(hovered));
       await page.mouse.move(720, 870);
-      const older = langs.findIndex((l, i) => i > after.focus && l === 0);
       c = await press('ArrowLeft', older);
       const js = listOf(0);
       check('the next step goes to the nearest commit of the new pin in that direction', c.focus === older && c.count === `${js.length - js.indexOf(older)} of ${js.length}`, JSON.stringify(c));
@@ -1216,6 +1220,516 @@ async function browseChecks(gpu) {
   check('clearing it turns browsing back on', s.browseDisabled === false);
   check('browse checks left the console clean', !logs.length, logs.join(' | '));
   await context.close();
+}
+
+// the repo toggle and the one stepping rule behind the arrow keys, prev and next and their disabled states. the
+// reference here walks the data on its own: the nearest commit the pin keeps toward the present (1) or the past (-1),
+// inside the open commit's repo while the toggle is on
+async function repoScopeChecks(gpu) {
+  const raw = JSON.parse(await readFile(path.join(ROOT, 'data', 'commits.json'), 'utf8'));
+  // ordered like the page: newest first, stable
+  const rows = raw.commits.map((c) => ({ repo: c[0], sha: c[1], ts: c[2] })).sort((a, b) => b.ts - a.ts);
+  const n = rows.length;
+  const repoOf = (i) => rows[i].repo;
+  const langOf = (i) => raw.repos[rows[i].repo].lang;
+  const keeps = (pin, i) => pin === null || langOf(i) === pin;
+  const ref = (i, dir, pin, repoOnly) => {
+    for (let j = i - dir; j >= 0 && j < n; j -= dir) if (keeps(pin, j) && (!repoOnly || repoOf(j) === repoOf(i))) return j;
+    return -1;
+  };
+  const all = [...Array(n).keys()];
+  const counters = (i, pin) => {
+    const pass = all.filter((j) => keeps(pin, j));
+    const repo = all.filter((j) => repoOf(j) === repoOf(i));
+    return { count: keeps(pin, i) ? `${pass.length - pass.indexOf(i)} of ${pass.length}` : null, pos: `${repo.length - repo.indexOf(i)} of ${repo.length} in this repo` };
+  };
+  const step = (dir) => `.card-step[data-step="${dir}"]`;
+  const look = (page) =>
+    page.evaluate(() => {
+      const s = window.__starfield.state();
+      const q = (sel) => document.querySelector(sel);
+      const count = q('.card [data-f="count"]');
+      const r = q('.card').getBoundingClientRect();
+      const a = document.activeElement;
+      return {
+        focus: s.focus,
+        flying: s.flying,
+        repoOnly: s.repoOnly,
+        travel: s.travelTarget,
+        cam: [s.cam.x, s.cam.y, s.cam.z].map((v) => v.toFixed(5)).join(),
+        open: !q('.card').hidden,
+        hash: q('.card [data-f="hash"]').textContent,
+        count: count.hidden ? null : count.textContent,
+        pos: q('.card [data-f="pos"]').textContent,
+        prev: q('.card-step[data-step="-1"]').disabled,
+        next: q('.card-step[data-step="1"]').disabled,
+        rect: [r.x, r.y, r.width, r.height].map(Math.round).join(),
+        live: q('[aria-live]').textContent,
+        active: a === q('.card') ? 'card' : a?.matches('.repo-only') ? 'toggle' : a?.closest('.card') ? 'in card' : a?.className || a?.tagName,
+        pressed: q('.repo-only').getAttribute('aria-pressed'),
+        stars: document.documentElement.classList.contains('is-stars'),
+      };
+    });
+  // the open card shows the commit in focus, with the reference's disabled states and counters
+  const agrees = (v, pin, repoOnly) => {
+    const c = counters(v.focus, pin);
+    return v.open && !v.flying && v.hash === rows[v.focus].sha.slice(0, 7) && v.prev === ref(v.focus, -1, pin, repoOnly) < 0 && v.next === ref(v.focus, 1, pin, repoOnly) < 0 && v.count === c.count && v.pos === c.pos;
+  };
+  const QUIET = ['focus', 'cam', 'hash', 'rect', 'live', 'active', 'prev', 'next', 'count', 'pos', 'travel'];
+  const quiet = (a, b) => QUIET.every((k) => a[k] === b[k]);
+
+  const { page, context, logs } = await open(gpu, `${ORIGIN}/?debug`, { width: 1440, height: 900, reduced: true });
+  let said = 0;
+  page.on('console', () => said++);
+  await sceneReady(page);
+  const langs = await page.evaluate(() => Array.from(window.__starfield.layout.langs));
+  check('repo scope: the reference reads the data in the page order', langs.length === n && langs.every((l, i) => l === langOf(i)));
+
+  // from the open card: every commit the rule reaches toward the past, then back up to the present. at each one the
+  // card agrees with the reference, and the button and the arrow key land on the same commit (the opposite key comes
+  // back). at each end the arrow key and the disabled button change nothing at all: no flight, card, focus, words or
+  // console output
+  async function walk(pin, repoOnly) {
+    const bad = [];
+    const seen = new Set();
+    for (const dir of [-1, 1]) {
+      const key = dir < 0 ? 'ArrowLeft' : 'ArrowRight';
+      const back = dir < 0 ? 'ArrowRight' : 'ArrowLeft';
+      for (let guard = 0; guard <= n && bad.length < 5; guard++) {
+        let v = await look(page);
+        seen.add(v.focus);
+        if (!agrees(v, pin, repoOnly)) bad.push(`at ${v.focus}: ${JSON.stringify(v)}`);
+        const t = ref(v.focus, dir, pin, repoOnly);
+        if (t < 0) {
+          await frames(page, 2);
+          v = await look(page);
+          const before = said;
+          await page.keyboard.press(key);
+          await page.evaluate((sel) => document.querySelector(sel).click(), step(dir));
+          await frames(page, 2);
+          const w = await look(page);
+          if (!quiet(v, w) || said !== before) bad.push(`end ${v.focus} toward ${dir}: ${JSON.stringify(w)}`);
+          break;
+        }
+        await page.evaluate((sel) => document.querySelector(sel).click(), step(dir));
+        const byButton = (await look(page)).focus;
+        await page.keyboard.press(back);
+        const returned = (await look(page)).focus;
+        await page.keyboard.press(key);
+        const byKey = (await look(page)).focus;
+        if (byButton !== t || returned !== v.focus || byKey !== t) bad.push(`${v.focus} toward ${dir}: button ${byButton}, back ${returned}, key ${byKey}, want ${t}`);
+      }
+    }
+    const repos = new Set([...seen].map(repoOf));
+    return { bad, seen, repos };
+  }
+  const pinLegend = async (lang) => {
+    await page.click(lang === null ? '.legend-all' : `.legend-dot[data-lang="${lang}"]`);
+    await page.mouse.move(720, 600);
+    await sleep(150);
+  };
+  const browseTo = async () => {
+    await page.click('.browse');
+    await page.waitForFunction(() => window.__starfield.state().focus >= 0 && !window.__starfield.state().flying, null, { timeout: 4000 });
+    await page.mouse.move(720, 600);
+  };
+  const close = async () => {
+    await page.keyboard.press('Escape');
+    await page.waitForFunction(() => window.__starfield.state().focus === -1, null, { timeout: 4000 });
+  };
+  // after the controls' color transitions settle
+  const shot = (name, clip) => sleep(250).then(() => page.screenshot({ path: `${OUT}/${name}.png`, ...(clip ? { clip } : {}) }));
+  const UI = { x: 0, y: 760, width: 1440, height: 140 };
+
+  // the toggle: off by default, a button beside browse commits in one group of the stars ui, never in the card
+  await page.click('.mode-toggle');
+  await sleep(600);
+  await page.mouse.move(720, 600);
+  const ui = await page.evaluate(() => {
+    const t = document.querySelector('.repo-only');
+    const b = document.querySelector('.browse');
+    const tr = t.getBoundingClientRect();
+    const br = b.getBoundingClientRect();
+    const fs = (el) => parseFloat(getComputedStyle(el).fontSize);
+    return {
+      group: t.parentElement === b.parentElement && t.parentElement.classList.contains('browse-group') && !!t.closest('.stars-ui') && !t.closest('.card'),
+      right: tr.left > br.right && tr.left - br.right < 24 && Math.abs(tr.top + tr.bottom - br.top - br.bottom) < 6,
+      smaller: fs(t) < fs(b),
+      tag: t.tagName,
+      type: t.type,
+      name: t.textContent.trim(),
+      title: t.title,
+      pressed: t.getAttribute('aria-pressed'),
+      disabled: t.disabled,
+      repoOnly: window.__starfield.state().repoOnly,
+      cardControls: [...document.querySelectorAll('.card button, .card a')].map((el) => el.className.split(' ')[0]).join(),
+    };
+  });
+  check('repo toggle: a button beside browse commits, to its right, in one group of the stars ui and not in the card', ui.group && ui.right && ui.smaller && ui.tag === 'BUTTON' && ui.type === 'button', JSON.stringify(ui));
+  check('repo toggle: "this repo only", aria-pressed, its title, enabled, off by default', ui.name === 'this repo only' && ui.title === "step only through this repo's commits" && ui.pressed === 'false' && !ui.disabled && ui.repoOnly === false, JSON.stringify(ui));
+  check('the card gets no new control', ui.cardControls === 'card-close,hash-chip,card-step,card-step,tlink', ui.cardControls);
+  await shot('repo-ui-off', UI);
+
+  // before a card: the toggle only sets the next browse. no camera movement, no card
+  let a = await look(page);
+  await page.click('.repo-only');
+  await page.mouse.move(720, 600);
+  let b = await look(page);
+  check('repo toggle with no card: on, no camera movement, no card', b.repoOnly && b.pressed === 'true' && b.cam === a.cam && b.focus === -1 && !b.open, JSON.stringify(b));
+  await shot('repo-ui-on', UI);
+  await browseTo();
+  a = await look(page);
+  check('browse ignores the toggle: the newest commit overall opens', a.focus === 0 && agrees(a, null, true), JSON.stringify(a));
+  await page.keyboard.press('ArrowLeft');
+  await page.keyboard.press('ArrowLeft');
+  b = await look(page);
+  check('a toggle set before the card rules its steps: two steps back stay in the repo', b.focus === ref(ref(0, -1, null, true), -1, null, true) && repoOf(b.focus) === repoOf(0) && b.focus !== 2, `${a.focus} -> ${b.focus}`);
+  await page.keyboard.press('ArrowRight');
+  await page.keyboard.press('ArrowRight');
+
+  // toggle on: arrows and buttons stay in the repo and agree, from its newest through the middle to its oldest and back
+  let w = await walk(null, true);
+  const repoSize = (r, pin = null) => all.filter((j) => repoOf(j) === r && keeps(pin, j)).length;
+  check('repo toggle on, nothing pinned: arrows and buttons agree, stay in the repo, disable at its ends, quiet there', !w.bad.length && w.repos.size === 1 && w.seen.size === repoSize(repoOf(0)), `${w.seen.size} of ${repoSize(repoOf(0))} | ${w.bad.join(' ; ')}`);
+
+  // the toggle with a card open: steps and disabled states change in place, the card and camera stay
+  await page.click('.repo-only');
+  await page.mouse.move(720, 600);
+  a = await look(page);
+  check('repo toggle off with a card open: the rule changes in place, no camera movement or card reload', !a.repoOnly && a.pressed === 'false' && a.focus === 0 && agrees(a, null, false), JSON.stringify(a));
+  await page.keyboard.press('ArrowLeft');
+  await page.keyboard.press('ArrowLeft');
+  a = await look(page);
+  await frames(page, 2);
+  a = await look(page);
+  check('repo toggle off: the arrows cross into another repo', a.focus === 2 && repoOf(2) !== repoOf(1), JSON.stringify(a));
+  // the shots show the toggle itself, not its accent focus ring
+  await page.focus('.card');
+  await shot('repo-card-off');
+  await page.click('.repo-only');
+  b = await look(page);
+  check('repo toggle on at a repo\'s newest commit: next turns off at once, counters, card and camera unchanged', b.repoOnly && b.next && !b.prev && agrees(b, null, true) && b.count === a.count && b.pos === a.pos && b.cam === a.cam && b.hash === a.hash && b.rect === a.rect, JSON.stringify({ a, b }));
+  await page.mouse.move(720, 600);
+  await shot('repo-card-next-disabled');
+  // a mouse click left focus on the toggle, which the card keeps: the arrows step from there, escape closes
+  check('a mouse click on the toggle with a card open keeps focus there', b.active === 'toggle', b.active);
+  const style = await page.evaluate(() => {
+    const [p, x] = document.querySelectorAll('.card-step');
+    const g = (el) => ({ opacity: getComputedStyle(el).opacity, cursor: getComputedStyle(el).cursor, color: getComputedStyle(el).color });
+    return { enabled: g(p), disabled: g(x) };
+  });
+  await page.hover(step(1));
+  const hovered = await page.evaluate(() => getComputedStyle(document.querySelector('.card-step[data-step="1"]')).color);
+  await page.mouse.move(720, 600);
+  check('disabled steps are clearly dimmed, not-allowed, with no hover style', Number(style.disabled.opacity) <= 0.4 && style.enabled.opacity === '1' && style.disabled.cursor === 'not-allowed' && hovered === style.disabled.color, JSON.stringify({ style, hovered }));
+  await page.focus('.repo-only');
+  a = await look(page);
+  const before = said;
+  await page.keyboard.press('ArrowRight');
+  await frames(page, 2);
+  b = await look(page);
+  check('toggle focused, at the end: the arrow does nothing at all', quiet(a, b) && said === before && b.active === 'toggle', JSON.stringify(b));
+  await page.keyboard.press('ArrowLeft');
+  b = await look(page);
+  check('toggle focused: the arrow steps the card like the card\'s own keys, no travel, focus stays on the toggle', b.focus === ref(2, -1, null, true) && b.travel === a.travel && b.active === 'toggle' && agrees(b, null, true), JSON.stringify(b));
+  await frames(page, 2);
+  await page.focus('.card');
+  await shot('repo-card-on');
+  await page.focus('.repo-only');
+  await page.keyboard.press('Escape');
+  await page.waitForFunction(() => window.__starfield.state().focus === -1, null, { timeout: 4000 });
+  b = await look(page);
+  check('toggle focused: escape closes the card only, focus back on the opener, the toggle stays on', b.stars && !b.open && b.active === 'browse' && b.repoOnly && b.pressed === 'true', JSON.stringify(b));
+
+  // persistence: closing and reopening, and a flight from star to star
+  await browseTo();
+  await page.keyboard.press('ArrowLeft');
+  await page.keyboard.press('ArrowLeft');
+  a = await look(page);
+  check('the toggle persists across closing and reopening a card', a.repoOnly && a.focus === ref(ref(0, -1, null, true), -1, null, true) && agrees(a, null, true), JSON.stringify(a));
+  const star = await clickableStar(page);
+  if (star) {
+    await page.mouse.click(star.x, star.y);
+    await page.waitForFunction((i) => window.__starfield.state().focus === i && !window.__starfield.state().flying, star.i, { timeout: 4000 }).catch(() => {});
+    await page.mouse.move(720, 600);
+    a = await look(page);
+    check('the toggle persists across a star to star flight', a.focus === star.i && a.repoOnly && agrees(a, null, true), JSON.stringify(a));
+  } else {
+    check('found a star to fly to with a card open', false);
+  }
+  await close();
+
+  // toggle on, the repo's own language pinned: the intersection keeps the walk in this repo, never the other
+  // javascript repo
+  await pinLegend(langOf(0));
+  await browseTo();
+  w = await walk(langOf(0), true);
+  check('repo toggle on, its own language pinned: arrows and buttons agree and stay in the repo', !w.bad.length && w.repos.size === 1 && w.seen.size === repoSize(repoOf(0), langOf(0)), `${w.seen.size} | ${w.bad.join(' ; ')}`);
+  // strict: a pin that leaves this repo out turns both steps off and the arrows do nothing; the toggle stays on and
+  // usable, and turning it off browses on to the nearest commit of the pin
+  const python = 5;
+  a = await look(page);
+  await pinLegend(python);
+  b = await look(page);
+  // its height may change: a commit outside the pin hides its n of total
+  check('pin changed with the toggle on: the card stays put, camera too', b.focus === a.focus && b.cam === a.cam && b.hash === a.hash, JSON.stringify(b));
+  check('toggle on, a pin outside the repo: prev and next both off, no fallback to other repos', b.prev && b.next && agrees(b, python, true), JSON.stringify(b));
+  await frames(page, 2);
+  a = await look(page);
+  const quietBefore = said;
+  await page.keyboard.press('ArrowLeft');
+  await page.keyboard.press('ArrowRight');
+  await frames(page, 2);
+  b = await look(page);
+  check('toggle on, a pin outside the repo: the arrows do nothing', quiet(a, b) && said === quietBefore, JSON.stringify(b));
+  await shot('repo-card-both-disabled');
+  const usable = await page.evaluate(() => ({ disabled: document.querySelector('.repo-only').disabled, pressed: document.querySelector('.repo-only').getAttribute('aria-pressed') }));
+  check('the toggle stays on and usable', !usable.disabled && usable.pressed === 'true', JSON.stringify(usable));
+  await page.click('.repo-only');
+  await page.mouse.move(720, 600);
+  b = await look(page);
+  check('toggle off: browsing returns to the pin, across repos', !b.repoOnly && agrees(b, python, false) && b.cam === a.cam, JSON.stringify(b));
+  await page.keyboard.press('ArrowLeft');
+  b = await look(page);
+  check('toggle off: the next step goes to the nearest commit of the pin in that direction', b.focus === ref(a.focus, -1, python, false) && b.focus >= 0, `${a.focus} -> ${b.focus}`);
+  await close();
+
+  // toggle off: arrows and buttons agree from every commit, across repos, under no pin, a language and the other bucket
+  const OTHER = raw.languages.findIndex((l) => l.name === 'other');
+  for (const [pin, name] of [[null, 'nothing pinned'], [langOf(0), 'javascript pinned'], [OTHER, 'the other bucket pinned']]) {
+    await pinLegend(pin);
+    await browseTo();
+    w = await walk(pin, false);
+    const pass = all.filter((j) => keeps(pin, j));
+    check(`repo toggle off, ${name}: arrows and buttons agree from every commit, across repos, disable at the ends, quiet there`, !w.bad.length && w.seen.size === pass.length && w.repos.size > 1, `${w.seen.size} of ${pass.length} in ${w.repos.size} repos | ${w.bad.join(' ; ')}`);
+    await close();
+  }
+  await pinLegend(python);
+  await browseTo();
+  const pythons = all.filter((j) => langOf(j) === python);
+  for (let k = 1; k < pythons.length; k++) await page.keyboard.press('ArrowLeft');
+  await frames(page, 2);
+  a = await look(page);
+  check('the oldest commit of a pin: prev off, next on', a.focus === pythons.at(-1) && a.prev && !a.next, JSON.stringify(a));
+  await shot('repo-card-prev-disabled');
+  await close();
+
+  // the other bucket with the toggle on: its repos browse inside themselves, a repo outside it has both steps off
+  await page.click('.repo-only');
+  await pinLegend(OTHER);
+  await browseTo();
+  const start = (await look(page)).focus;
+  w = await walk(OTHER, true);
+  check('toggle on, the other bucket pinned: a repo in it browses within the repo', !w.bad.length && w.repos.size === 1 && w.seen.size === repoSize(repoOf(start), OTHER), `${w.seen.size} | ${w.bad.join(' ; ')}`);
+  await close();
+  await pinLegend(null);
+  await browseTo();
+  await pinLegend(OTHER);
+  b = await look(page);
+  check('toggle on, the other bucket pinned: a repo outside it has prev and next off', b.focus === 0 && b.prev && b.next && agrees(b, OTHER, true), JSON.stringify(b));
+  // a pin change from none to the repo's own language, toggle on: in place
+  await pinLegend(null);
+  a = await look(page);
+  await pinLegend(langOf(0));
+  b = await look(page);
+  check('pin changed to the repo\'s own language with the toggle on: in place, the steps follow at once', b.focus === a.focus && b.cam === a.cam && agrees(b, langOf(0), true), JSON.stringify(b));
+  await pinLegend(null);
+
+  // keyboard: the toggle is the last stop of the card's tab cycle, both ways, and enter and space flip it
+  await page.click('.repo-only');
+  await page.keyboard.press('ArrowLeft');
+  await page.evaluate(() => document.querySelector('.card').focus());
+  const expected = await page.evaluate(() => [...document.querySelectorAll('.card button:not(:disabled), .card a[href]')].filter((el) => !el.closest('[hidden]')).map((el) => el.dataset.step ?? el.className.split(' ')[0]).concat('repo-only'));
+  const tabs = async (shift) => {
+    const seen = [];
+    for (let k = 0; k <= expected.length; k++) {
+      await page.keyboard.press(shift ? 'Shift+Tab' : 'Tab');
+      seen.push(await page.evaluate(() => document.activeElement.dataset.step ?? document.activeElement.className.split(' ')[0]));
+    }
+    return seen;
+  };
+  const fwd = await tabs(false);
+  check('tab cycles through the card and then the toggle, back to the card', fwd.join() === [...expected, expected[0]].join(), `${fwd.join()} (want ${expected.join()})`);
+  const bwd = await tabs(true);
+  const rev = [...expected].reverse();
+  check('shift tab cycles the other way', bwd.join() === [...rev, rev[0]].join(), bwd.join());
+  await page.focus('.repo-only');
+  await page.keyboard.press('Enter');
+  a = await look(page);
+  await page.keyboard.press(' ');
+  b = await look(page);
+  check('enter and space flip the toggle with a card open, focus stays', a.pressed === 'true' && b.pressed === 'false' && a.active === 'toggle' && b.active === 'toggle' && b.open, `${a.pressed} ${b.pressed}`);
+  await close();
+
+  // no card: a plain tab stop after browse; enter and space flip it; the arrows travel and never flip it
+  await page.focus('.browse');
+  await page.keyboard.press('Tab');
+  a = await look(page);
+  await page.keyboard.press('Enter');
+  b = await look(page);
+  await page.keyboard.press(' ');
+  const c = await look(page);
+  check('no card: tab goes from browse to the toggle, enter and space flip it', a.active === 'toggle' && b.pressed === 'true' && c.pressed === 'false', `${a.active} ${b.pressed} ${c.pressed}`);
+  await page.keyboard.press('ArrowLeft');
+  await page.keyboard.press('ArrowLeft');
+  await page.keyboard.press('ArrowRight');
+  b = await look(page);
+  check('no card: the arrow keys travel as before and never flip the toggle', b.travel < c.travel && b.pressed === 'false' && b.active === 'toggle', `${c.travel} -> ${b.travel}`);
+
+  // the pressed state follows the accent, pinned or not, once its color transition ends
+  await page.click('.repo-only');
+  await sleep(300);
+  const accent = () =>
+    page.evaluate(() => {
+      const hex = getComputedStyle(document.documentElement).getPropertyValue('--accent').trim();
+      const rgb = `rgb(${[1, 3, 5].map((k) => parseInt(hex.slice(k, k + 2), 16)).join(', ')})`;
+      return { rgb, color: getComputedStyle(document.querySelector('.repo-only')).color };
+    });
+  const plain = await accent();
+  // javascript: python's slot is the default accent itself
+  await pinLegend(langOf(0));
+  await sleep(300);
+  const pinned = await accent();
+  check('the pressed toggle takes the accent color and follows a pin', plain.color === plain.rgb && pinned.color === pinned.rgb && pinned.rgb !== plain.rgb, JSON.stringify({ plain, pinned }));
+  await pinLegend(null);
+
+  // text mode hides the whole group; the toggle resets on reload
+  await page.click('.mode-toggle');
+  await sleep(700);
+  const text = await page.evaluate(() => ({ vis: getComputedStyle(document.querySelector('.browse-group')).visibility, shown: document.querySelector('.repo-only').checkVisibility({ visibilityProperty: true }) }));
+  check('text mode: the browse group, toggle included, is hidden', text.vis === 'hidden' && !text.shown, JSON.stringify(text));
+  await page.reload({ waitUntil: 'networkidle' });
+  await sceneReady(page);
+  const fresh = await page.evaluate(() => ({ repoOnly: window.__starfield.state().repoOnly, pressed: document.querySelector('.repo-only').getAttribute('aria-pressed') }));
+  check('a reload resets the toggle to off', fresh.repoOnly === false && fresh.pressed === 'false', JSON.stringify(fresh));
+  check('repo scope checks left the console clean', !logs.length, logs.join(' | '));
+  await context.close();
+
+  // a repo with a single commit: both steps off with the toggle on
+  {
+    const solo = { ...raw, repos: [...raw.repos, { name: 'solo', lang: python, primary: 'python' }], commits: [[raw.repos.length, 'f'.repeat(40), rows[0].ts + 100, 1, 1, 1, 'solo'], ...raw.commits] };
+    const ctx = await gpu.newContext({ viewport: { width: 1440, height: 900 }, reducedMotion: 'reduce' });
+    await ctx.route('**/data/commits.json', (route) => route.fulfill({ contentType: 'application/json', body: JSON.stringify(solo) }));
+    const p = await ctx.newPage();
+    const l = [];
+    p.on('console', (m) => (m.type() === 'error' || m.type() === 'warning') && l.push(`${m.type()}: ${m.text()}`));
+    p.on('pageerror', (e) => l.push(`pageerror: ${e.message}`));
+    await p.goto(`${ORIGIN}/?debug`, { waitUntil: 'networkidle' });
+    await sceneReady(p);
+    await p.click('.mode-toggle');
+    await sleep(600);
+    await p.click('.browse');
+    await p.waitForFunction(() => window.__starfield.state().focus === 0 && !window.__starfield.state().flying, null, { timeout: 4000 });
+    await p.click('.repo-only');
+    await p.focus('.card');
+    const v = await p.evaluate(() => ({ prev: document.querySelector('.card-step[data-step="-1"]').disabled, next: document.querySelector('.card-step[data-step="1"]').disabled, pos: document.querySelector('.card [data-f="pos"]').textContent, cam: JSON.stringify(window.__starfield.state().cam) }));
+    await p.keyboard.press('ArrowLeft');
+    await p.keyboard.press('ArrowRight');
+    const after = await p.evaluate(() => ({ focus: window.__starfield.state().focus, cam: JSON.stringify(window.__starfield.state().cam) }));
+    check('a one commit repo with the toggle on: prev and next both off, the arrows do nothing', v.prev && v.next && v.pos === '1 of 1 in this repo' && after.focus === 0 && after.cam === v.cam, JSON.stringify({ v, after }));
+    await p.click('.repo-only');
+    const off = await p.evaluate(() => ({ prev: document.querySelector('.card-step[data-step="-1"]').disabled, next: document.querySelector('.card-step[data-step="1"]').disabled }));
+    check('the same commit with the toggle off: prev on toward older repos, next off at the newest', !off.prev && off.next, JSON.stringify(off));
+    check('one commit repo checks left the console clean', !l.length, l.join(' | '));
+    await ctx.close();
+  }
+
+  // the narrow view has no stars ui at all
+  {
+    const ctx = await gpu.newContext({ viewport: { width: 390, height: 844 }, deviceScaleFactor: 3, isMobile: true, hasTouch: true });
+    const p = await ctx.newPage();
+    await p.goto(`${ORIGIN}/`, { waitUntil: 'networkidle' });
+    await sleep(500);
+    check('narrow view: no browse group or repo toggle', !(await p.evaluate(() => !!document.querySelector('.browse-group, .repo-only'))));
+    await ctx.close();
+  }
+
+  // a pull request card in stars mode keeps its own trap: the toggle never joins it, a click on it hands focus back
+  await attempt('repo toggle beside a pull request card', async () => {
+    const { page: p, context: ctx, logs: l } = await open(gpu, `${ORIGIN}/?debug&prs=mock`, { width: 1440, height: 900 });
+    await sceneReady(p);
+    await p.click('.mode-toggle');
+    await sleep(900);
+    const s = await catchableStreak(p);
+    if (!s) {
+      check('caught a streak in stars mode', false);
+      await ctx.close();
+      return;
+    }
+    await p.mouse.click(s.screen.x, s.screen.y);
+    await p.waitForFunction(() => !document.querySelector('.card').hidden && document.querySelector('.card').classList.contains('is-pr') && !window.__starfield.state().flying, null, { timeout: 6000 });
+    const where = [];
+    for (let k = 0; k < 6; k++) {
+      await p.keyboard.press('Tab');
+      where.push(await p.evaluate(() => (document.querySelector('.card').contains(document.activeElement) ? 'card' : document.activeElement?.className)));
+    }
+    await p.click('.repo-only');
+    await sleep(100);
+    const v = await p.evaluate(() => ({ inside: document.querySelector('.card').contains(document.activeElement), pr: window.__starfield.state().pr, open: !document.querySelector('.card').hidden }));
+    check('a pull request card: tab never reaches the toggle, a click on it hands focus back to the card', where.every((x) => x === 'card') && v.inside && v.open && !!v.pr, JSON.stringify({ where, v }));
+    await p.keyboard.press('Escape');
+    await sleep(1500);
+    check('escape still closes the pull request card', (await p.evaluate(() => window.__starfield.state().pr)) === null);
+    check('pull request toggle checks left the console clean', !l.length, l.join(' | '));
+    await ctx.close();
+  });
+
+  // the open card never overlaps the browse group, at rest or flying to a star near the lower left
+  for (const [vw, vh] of [[1280, 720], [1440, 900], [1920, 1080], [1024, 500]]) {
+    await attempt(`${vw}x${vh} card and browse group`, async () => {
+      const { page: p, context: ctx, logs: l } = await open(gpu, `${ORIGIN}/?debug`, { width: vw, height: vh });
+      await sceneReady(p);
+      await p.click('.mode-toggle');
+      await sleep(900);
+      await p.mouse.move(vw / 2, vh / 3);
+      // the pickable star furthest toward the lower left; in focus and in that quarter when strict. close to a
+      // focused star the rest of the field is defocused, so a chained flight takes the best one anywhere
+      const lowerLeft = (strict) =>
+        p.evaluate((strict) => {
+          const f = window.__starfield;
+          const st = f.state();
+          const card = document.querySelector('.card').getBoundingClientRect();
+          let best = null;
+          for (let i = 0; i < f.layout.n; i++) {
+            if (i === st.focus) continue;
+            const q = f.project(i);
+            if (q.dist < 0.8 || q.x < 40 || q.x > innerWidth - 40 || q.y < 120 || q.y > innerHeight - 100) continue;
+            if (strict && (q.coc >= 26 || q.x > innerWidth * 0.45 || q.y < innerHeight * 0.45)) continue;
+            if (card.width && q.x > card.left - 30 && q.x < card.right + 30 && q.y > card.top - 30 && q.y < card.bottom + 30) continue;
+            if (f.pickAt(q.x, q.y, st.focus) !== i || !document.elementFromPoint(q.x, q.y)?.classList.contains('starfield')) continue;
+            if (!best || q.y - q.x > best.y - best.x) best = { i, x: Math.round(q.x), y: Math.round(q.y) };
+          }
+          return best;
+        }, strict);
+      const overlap = () =>
+        p.evaluate(() => {
+          const c = document.querySelector('.card');
+          if (c.hidden) return null;
+          const r = c.getBoundingClientRect();
+          return [...document.querySelectorAll('.browse-group, .browse, .repo-only')].some((el) => {
+            const g = el.getBoundingClientRect();
+            return r.left < g.right && r.right > g.left && r.top < g.bottom && r.bottom > g.top;
+          });
+        });
+      const samples = [];
+      const first = await lowerLeft(true);
+      if (first) await p.mouse.click(first.x, first.y);
+      for (let k = 0; first && k < 30; k++) {
+        await sleep(60);
+        samples.push(await overlap());
+      }
+      const chained = (await lowerLeft(true)) ?? (await lowerLeft(false));
+      if (chained) await p.mouse.click(chained.x, chained.y);
+      for (let k = 0; chained && k < 30; k++) {
+        await sleep(50);
+        samples.push(await overlap());
+      }
+      const seen = samples.filter((x) => x !== null);
+      check(`${vw}x${vh}: the open card never overlaps the browse group, flying to a lower left star and at rest`, seen.length > 20 && !seen.includes(true) && !!first && !!chained, `${seen.length} samples, first star ${JSON.stringify(first)}, chained ${JSON.stringify(chained)}`);
+      check(`${vw}x${vh} card and group checks left the console clean`, !l.length, l.join(' | '));
+      await ctx.close();
+    });
+  }
 }
 
 // the narrow view: the 2d sky, names and order, glass cards and tap targets, the spotify card in every state,
@@ -2546,7 +3060,7 @@ async function starsContrastChecks(gpu) {
     });
     check(`stars mode contrast, ${name}`, worst.ratio >= 4.5, `worst ${worst.ratio.toFixed(2)}:1 "${worst.text}" over rgb(${worst.bg})`);
   };
-  await measure('hint, readout, browse and toggle', '.hint, .readout, .browse, .mode-label');
+  await measure('hint, readout, browse, repo toggle and mode toggle', '.hint, .readout, .browse, .repo-only, .mode-label');
   await page.locator('.legend-dot:not(.legend-all)').nth(1).hover();
   await sleep(500);
   await measure('legend label', '.legend-label b, .legend-label');
@@ -4071,7 +4585,10 @@ try {
   if (want('pick')) await pickChecks(gpu);
   if (want('overscroll')) await overscrollChecks(gpu);
   if (want('chain')) await chainChecks(gpu);
-  if (want('browse')) await browseChecks(gpu);
+  if (want('browse')) {
+    await browseChecks(gpu);
+    await repoScopeChecks(gpu);
+  }
   if (want('narrow')) await narrowChecks(gpu);
   if (want('cardlayout')) await cardLayoutChecks(gpu);
   if (want('rocket')) await rocketChecks(gpu);

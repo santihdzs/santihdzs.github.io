@@ -188,6 +188,48 @@
   cursor: default;
 }
 
+/* browse and the repo toggle, one unit; the gap between them stays open to the field */
+.stars-ui-inner > .browse-group {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  pointer-events: none;
+}
+
+.browse-group > * {
+  pointer-events: auto;
+}
+
+/* too narrow to sit beside browse without reaching the centered hint: the toggle stacks just above it */
+@media (max-width: 880px) {
+  .stars-ui-inner > .browse-group {
+    flex-direction: column-reverse;
+    align-items: flex-start;
+    gap: 0.25rem;
+  }
+}
+
+.repo-only {
+  min-height: 24px;
+  padding: 0 0.6rem;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  font: 400 0.6875rem / 1 var(--font-mono);
+  color: var(--muted);
+  transition: color 0.2s ease, border-color 0.2s ease;
+}
+
+.repo-only:hover,
+.repo-only:focus-visible {
+  color: var(--text);
+  border-color: var(--line-strong);
+}
+
+.repo-only[aria-pressed='true'] {
+  color: var(--accent);
+  border-color: rgb(var(--accent-rgb) / 0.55);
+}
+
 .readout {
   color: var(--text);
   font-variant-numeric: tabular-nums;
@@ -441,7 +483,7 @@
 
 .card-step:disabled {
   opacity: 0.35;
-  cursor: default;
+  cursor: not-allowed;
 }
 
 .card-nav .tlink {

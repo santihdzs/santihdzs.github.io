@@ -49,8 +49,8 @@ const TEMPLATE = `
           </p>
         </div>
         <div class="card-layer card-nav">
-          <button class="card-step" type="button" data-c data-step="-1" aria-label="previous commit in this repo">&lsaquo; prev</button>
-          <button class="card-step" type="button" data-c data-step="1" aria-label="next commit in this repo">next &rsaquo;</button>
+          <button class="card-step" type="button" data-c data-step="-1" aria-label="previous commit">&lsaquo; prev</button>
+          <button class="card-step" type="button" data-c data-step="1" aria-label="next commit">next &rsaquo;</button>
           <a class="tlink" data-f="link" target="_blank" rel="noopener"><span data-f="linkText"></span><svg class="i" aria-hidden="true" focusable="false"><use href="#i-arrow"/></svg></a>
         </div>
       </div>
@@ -81,7 +81,7 @@ async function copyText(text) {
   }
 }
 
-export function createCard({ data, reduced, owner, onClose, onStep }) {
+export function createCard({ data, reduced, owner, onClose, onStep, companion = null }) {
   const el = document.createElement('section');
   el.className = 'card';
   el.hidden = true;
@@ -226,11 +226,17 @@ export function createCard({ data, reduced, owner, onClose, onStep }) {
     height = 0;
   }
 
+  // the companion (the scene's repo toggle) lives outside the card but joins a commit card's tab cycle and keys
+  const joined = () => open && kind === 'commit' && companion !== null;
+  const holds = (n) => el.contains(n) || (joined() && n === companion);
+
   function focusables() {
-    return [...el.querySelectorAll('button:not(:disabled), a[href]')].filter((n) => !n.closest('[hidden]'));
+    const list = [...el.querySelectorAll('button:not(:disabled), a[href]')].filter((n) => !n.closest('[hidden]'));
+    return joined() ? [...list, companion] : list;
   }
 
   function onKey(e) {
+    if (e.currentTarget === companion && !joined()) return;
     if (e.key === 'Escape') {
       e.preventDefault();
       e.stopPropagation();
@@ -238,26 +244,21 @@ export function createCard({ data, reduced, owner, onClose, onStep }) {
     } else if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') {
       e.preventDefault();
       e.stopPropagation();
-      if (kind === 'commit') onStep('all', e.key === 'ArrowRight' ? 1 : -1);
+      if (kind === 'commit') onStep(e.key === 'ArrowRight' ? 1 : -1);
     } else if (e.key === 'Tab') {
       const list = focusables();
       if (!list.length) return;
-      const first = list[0];
-      const last = list[list.length - 1];
-      const at = document.activeElement;
-      if (e.shiftKey && (at === first || at === el)) {
-        e.preventDefault();
-        last.focus();
-      } else if (!e.shiftKey && at === last) {
-        e.preventDefault();
-        first.focus();
-      }
+      // round the cycle; from the card itself tab enters at the first control, shift tab at the last
+      const k = list.indexOf(document.activeElement);
+      const to = k < 0 ? (e.shiftKey ? list.length - 1 : 0) : (k + (e.shiftKey ? list.length - 1 : 1)) % list.length;
+      e.preventDefault();
+      list[to].focus();
     }
   }
 
   // keep focus inside while open
   function onFocusIn(e) {
-    if (open && !el.contains(e.target)) el.focus({ preventScroll: true });
+    if (open && !holds(e.target)) el.focus({ preventScroll: true });
   }
 
   async function onCopy() {
@@ -273,9 +274,10 @@ export function createCard({ data, reduced, owner, onClose, onStep }) {
   }
 
   el.addEventListener('keydown', onKey);
+  companion?.addEventListener('keydown', onKey);
   close.addEventListener('click', () => onClose());
-  prev.addEventListener('click', () => onStep('repo', -1));
-  next.addEventListener('click', () => onStep('repo', 1));
+  prev.addEventListener('click', () => onStep(-1));
+  next.addEventListener('click', () => onStep(1));
   f.hash.addEventListener('click', onCopy);
   document.addEventListener('focusin', onFocusIn);
 
@@ -322,7 +324,7 @@ export function createCard({ data, reduced, owner, onClose, onStep }) {
           });
         }
         // escape and the arrow keys belong to the card for as long as it is open
-        if (!el.contains(document.activeElement)) el.focus({ preventScroll: true });
+        if (!holds(document.activeElement)) el.focus({ preventScroll: true });
         return;
       }
       fill(entry);
@@ -354,8 +356,8 @@ export function createCard({ data, reduced, owner, onClose, onStep }) {
     // returns the element that should get focus back, so a caller can restore it later
     hide() {
       if (!open) return null;
+      const hadFocus = holds(document.activeElement);
       open = false;
-      const hadFocus = el.contains(document.activeElement);
       const back = returnTo;
       entryKey = null;
       live.textContent = '';
@@ -447,6 +449,7 @@ export function createCard({ data, reduced, owner, onClose, onStep }) {
       clearTimeout(copyTimer);
       gsap.killTweensOf([cardIn, ...layers]);
       document.removeEventListener('focusin', onFocusIn);
+      companion?.removeEventListener('keydown', onKey);
       el.remove();
       tether.remove();
       pulse.remove();

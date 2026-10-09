@@ -26,7 +26,7 @@ const FLIGHT_TIME = 1.1;
 // on the column's edge), so the sides keep their brightness. the amount ramps in while the about section's top edge
 // rises from enter to settle (shares of the viewport height from its top) and eases with a time constant of ease
 // seconds. fallback is the column, as shares of the width, when the page cannot be measured
-const DIM = { field: 0.32, streak: 0.48, feather: 0.1, enter: 0.85, settle: 0.3, ease: 0.25, fallback: [1 / 3, 2 / 3] };
+const DIM = { field: 0.65, streak: 0.75, feather: 0.1, enter: 0.85, settle: 0.3, ease: 0.25, fallback: [1 / 3, 2 / 3] };
 
 // overscroll exit at the newest end, armed after some travel. at the edge a new gesture toward the
 // present starts counting. it is new after a pause of at least gap ms that also breaks the stream's
@@ -87,7 +87,7 @@ export function createStarfield({ data, prs = [], reduced, texture = 'nebula' })
   const picker = createPicker(layout);
   const maxPoint = gl.getParameter(gl.ALIASED_POINT_SIZE_RANGE)?.[1] ?? 64;
 
-  // per repo chronological order for the card's prev and next
+  // per repo chronological order for the card's "x of y in this repo"
   const repoOrder = new Map();
   const repoPos = new Int32Array(layout.n);
   for (let i = layout.n - 1; i >= 0; i--) {
@@ -131,6 +131,8 @@ export function createStarfield({ data, prs = [], reduced, texture = 'nebula' })
   // filters browsing
   let langFilter = null;
   let browseFilter = null;
+  // the repo toggle: stepping stays inside the open commit's repo. lives as long as the page, never stored
+  let repoOnly = false;
   let drift = 0;
   let time = 0;
   let last = performance.now();
@@ -161,11 +163,15 @@ export function createStarfield({ data, prs = [], reduced, texture = 'nebula' })
   ui.className = 'stars-ui';
   ui.innerHTML = `
     <div class="stars-ui-inner">
-      <button class="browse" type="button">browse commits</button>
+      <div class="browse-group">
+        <button class="browse" type="button">browse commits</button>
+        <button class="repo-only" type="button" aria-pressed="false" title="step only through this repo's commits">this repo only</button>
+      </div>
       <p class="hint"></p>
       <p class="readout" aria-hidden="true"></p>
     </div>`;
   const browse = ui.querySelector('.browse');
+  const repoToggle = ui.querySelector('.repo-only');
   const hint = ui.querySelector('.hint');
   const readout = ui.querySelector('.readout');
   hint.textContent = HINT;
@@ -176,6 +182,7 @@ export function createStarfield({ data, prs = [], reduced, texture = 'nebula' })
     owner: data.user || 'santihdzs',
     onClose: () => (pr ? closePr() : unfocus()),
     onStep: step,
+    companion: repoToggle,
   });
 
   document.body.prepend(canvas);
@@ -261,15 +268,14 @@ export function createStarfield({ data, prs = [], reduced, texture = 'nebula' })
 
   const browsable = (i) => keeps(browseFilter, layout.langs[i]);
 
-  // the nearest browsable commit from list position `at`, walking `dir`; -1 when there is none
-  function nearestIn(list, at, dir) {
-    for (let k = at + dir; k >= 0 && k < list.length; k += dir) if (browsable(list[k])) return list[k];
-    return -1;
-  }
-
-  // commits run newest first, so stepping toward the present walks down the index
-  function nearestCommit(i, dir) {
-    for (let j = i - dir; j >= 0 && j < layout.n; j -= dir) if (browsable(j)) return j;
+  // the one stepping rule for the arrow keys, prev and next and their disabled states: the nearest browsable
+  // commit from i toward the present (dir 1) or the past (-1), inside i's repo while the repo toggle is on; -1 at
+  // an end. commits run newest first, so stepping toward the present walks down the index
+  function stepTarget(i, dir) {
+    const repo = data.commits[i].repo;
+    for (let j = i - dir; j >= 0 && j < layout.n; j -= dir) {
+      if (browsable(j) && (!repoOnly || data.commits[j].repo === repo)) return j;
+    }
     return -1;
   }
 
@@ -289,8 +295,8 @@ export function createStarfield({ data, prs = [], reduced, texture = 'nebula' })
       if (j >= i) index++;
     }
     return {
-      canPrev: nearestIn(list, repoPos[i], -1) >= 0,
-      canNext: nearestIn(list, repoPos[i], 1) >= 0,
+      canPrev: stepTarget(i, -1) >= 0,
+      canNext: stepTarget(i, 1) >= 0,
       repoIndex: repoPos[i] + 1,
       repoTotal: list.length,
       index: browsable(i) ? index : null,
@@ -458,12 +464,10 @@ export function createStarfield({ data, prs = [], reduced, texture = 'nebula' })
     api.onPr?.(false, back, restore);
   }
 
-  // scope "repo" walks one repo chronologically, "all" walks every commit. both skip whatever the
-  // pinned language leaves out and stop at the ends
-  function step(scope, dir) {
+  function step(dir) {
     if (focus < 0) return;
-    const target = scope === 'repo' ? nearestIn(repoOrder.get(data.commits[focus].repo), repoPos[focus], dir) : nearestCommit(focus, dir);
-    if (target >= 0 && target < layout.n) focusStar(target);
+    const target = stepTarget(focus, dir);
+    if (target >= 0) focusStar(target);
   }
 
   function setHover(i) {
@@ -791,6 +795,12 @@ export function createStarfield({ data, prs = [], reduced, texture = 'nebula' })
   canvas.addEventListener('webglcontextlost', onContextLost);
   canvas.addEventListener('webglcontextrestored', onContextRestored);
   browse.addEventListener('click', () => focusStar(firstBrowsable(), browse));
+  // a preference, never disabled: it sets the next browse, or changes an open card's steps in place
+  repoToggle.addEventListener('click', () => {
+    repoOnly = !repoOnly;
+    repoToggle.setAttribute('aria-pressed', String(repoOnly));
+    syncBrowse();
+  });
   syncBrowse();
 
   applySize();
@@ -935,6 +945,7 @@ export function createStarfield({ data, prs = [], reduced, texture = 'nebula' })
       filter: langFilter,
       browseFilter,
       browseDisabled: browse.disabled,
+      repoOnly,
       cam: { x: cam.x, y: cam.y, z: cam.z },
       camera: { x: camera.position.x, y: camera.position.y, z: camera.position.z },
       saved: saved && { x: saved.x, y: saved.y, z: saved.z },
