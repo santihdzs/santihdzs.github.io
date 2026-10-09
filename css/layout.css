@@ -90,6 +90,7 @@ main,
   font-weight: 300;
   line-height: 1.5;
   color: var(--text);
+  text-wrap: balance;
 }
 
 .hero-links {
@@ -102,6 +103,28 @@ main,
 
 .linktree {
   display: none;
+}
+
+/* the narrow view's calm 2d sky, behind everything; it only exists on narrow screens */
+.sky {
+  position: fixed;
+  inset: 0;
+  z-index: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 1.2s ease;
+}
+
+.sky.is-on {
+  opacity: 1;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .sky {
+    transition: none;
+  }
 }
 
 [data-intro] {
@@ -220,7 +243,7 @@ main,
   }
 }
 
-@media (max-width: 720px) {
+@media (max-width: 720px), (max-height: 500px) and (pointer: coarse) and (orientation: landscape) {
   .topbar,
   .section,
   .site-footer,

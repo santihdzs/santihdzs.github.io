@@ -5,6 +5,8 @@ const TRAIL = 180;
 
 // the flyer reuses the footer rocket's outline and silhouette. exhaust lives in a group masked
 // by the silhouette, so trail and flame start at the nozzle and never draw inside the outline.
+// a second cut, one css pixel wider all round, keeps the mask's antialiased and resampled edge
+// outside the outline at any sub-pixel position of the flight.
 function buildFlyer(rocketSvg) {
   const silhouette = rocketSvg.querySelector('.rocket-silhouette').getAttribute('d');
   const height = 44 + TRAIL;
@@ -23,6 +25,7 @@ function buildFlyer(rocketSvg) {
       <mask id="rocket-cut-fly" maskUnits="userSpaceOnUse" x="-10" y="0" width="48" height="${height}">
         <rect x="-10" y="0" width="48" height="${height}" fill="#fff"/>
         <path d="${silhouette}" fill="#000" stroke="#000" stroke-width="2.6" stroke-linejoin="round"/>
+        <path d="${silhouette}" fill="none" stroke="#000" stroke-width="4.6" stroke-linejoin="round"/>
       </mask>
     </defs>
     <g mask="url(#rocket-cut-fly)">
@@ -102,8 +105,11 @@ export function createMode({ scene, reduced }) {
     if (peeking) {
       peeking = false;
       root.classList.remove('is-peek');
-      for (const el of page) el.inert = false;
-      fadePage(true);
+      // a peek closed by entering stars mode (a launch that lands mid peek) leaves the page to stars mode
+      if (!active) {
+        for (const el of page) el.inert = false;
+        fadePage(true);
+      }
       const target = [restore, peekFocus].find((el) => el && el !== document.body && document.contains(el) && !el.closest('[inert]'));
       if (target && (document.activeElement === document.body || !document.activeElement)) target.focus({ preventScroll: true });
       peekFocus = null;
@@ -184,11 +190,6 @@ export function createMode({ scene, reduced }) {
   rocket.hidden = false;
 
   return {
-    get active() {
-      return active;
-    },
-    enter,
-    exit,
     dispose() {
       launch?.progress(1);
       if (scene.prOpen) scene.closeCard();

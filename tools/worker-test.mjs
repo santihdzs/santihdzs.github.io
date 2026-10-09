@@ -33,6 +33,8 @@ globalThis.fetch = async (url, opts = {}) => {
     return new Response(JSON.stringify({ access_token: ACCESS, expires_in: 3600, ...(scenario.rotate ? { refresh_token: ROTATED } : {}) }), { status: 200 });
   }
   const auth = opts.headers?.authorization;
+  // the access token was revoked: every player call is refused
+  if (scenario.revoked) return new Response('', { status: 401 });
   if (scenario.expireOnce && !scenario.expired) {
     scenario.expired = true;
     return new Response('', { status: 401 });
@@ -96,9 +98,43 @@ r = await get(w);
 check('empty 200 body is treated like nothing playing', r.body.state === 'recent');
 
 w = await fresh();
-scenario = { current: { is_playing: false, item: track('Paused') } };
+calls = [];
+scenario = { current: { is_playing: false, progress_ms: 900, item: track('Paused') } };
 r = await get(w);
-check('paused track is not reported as playing', r.body.state === 'recent');
+check('paused track is last played, with no time and no progress', r.body.state === 'recent' && r.body.track.name === 'Paused' && r.body.track.playedAt === null && !('progressMs' in r.body.track), r.text);
+check('paused track needs no recently played call', !calls.some((u) => u.includes('/recently-played')) && calls.filter((u) => u.includes('/currently-playing')).length === 1, calls.join(' '));
+
+w = await fresh();
+scenario = { current: { is_playing: false, item: track('PausedSong') } };
+r = await get(w);
+check('a paused track wins over a different recently played track', r.body.track?.name === 'PausedSong' && r.body.track.name !== 'Recent', r.text);
+
+w = await fresh();
+scenario = { current: { is_playing: false, item: episode } };
+r = await get(w);
+check('a paused episode is last played with the show as the artist', r.body.state === 'recent' && r.body.track.artists[0] === 'The Show', r.text);
+
+w = await fresh();
+scenario = { current: { is_playing: false, item: null } };
+r = await get(w);
+check('paused with a null item falls back to recently played', r.body.state === 'recent' && r.body.track.name === 'Recent' && r.body.track.playedAt === '2026-10-06T10:00:00Z', r.text);
+
+w = await fresh();
+scenario = { current: { is_playing: false, item: { ...track('NoLink'), external_urls: {} } } };
+r = await get(w);
+check('paused with an unusable item falls back to recently played', r.body.state === 'recent' && r.body.track.name === 'Recent', r.text);
+
+w = await fresh();
+calls = [];
+scenario = { current: { is_playing: false, item: track('Paused') }, expireOnce: true };
+r = await get(w);
+check('paused: 401 refreshes once and retries', r.body.track?.name === 'Paused' && calls.filter((u) => u.includes('/api/token')).length === 2, calls.join(' '));
+
+w = await fresh();
+calls = [];
+scenario = { current: { is_playing: false, item: track('Paused') }, limit: true };
+r = await get(w);
+check('429 with no history is idle and skips recently played', r.body.state === 'idle' && !calls.some((u) => u.includes('/recently-played')), r.text);
 
 w = await fresh();
 scenario = { current: { is_playing: true, currently_playing_type: 'ad', item: null } };
@@ -164,6 +200,30 @@ store.clear();
 Date.now = () => realNow() + 28000;
 r = await get(w);
 check('retry-after is honored: no upstream call while blocked', !calls.some((u) => u.includes('api.spotify.com')) && r.body.track?.name === 'Good');
+Date.now = realNow;
+
+// spotify down for longer than a blip, on a fake clock: the access token is refused and every refresh
+// answers invalid_grant. the last good answer covers the first two minutes, then reads as last played, then idle
+w = await fresh();
+kv.clear();
+scenario = { current: { is_playing: true, progress_ms: 4321, item: track('Blip') } };
+await get(w);
+scenario = { current: { is_playing: true, item: track('Blip') }, revoked: true, tokenFail: true };
+const clockStart = Date.now();
+const at = async (minutes) => {
+  store.clear();
+  calls = [];
+  Date.now = () => clockStart + minutes * 60_000;
+  const res = await get(w);
+  return { ...res, tokens: calls.filter((u) => u.includes('/api/token')).length };
+};
+r = await at(1);
+check('spotify failing at +1 minute: still the last answer', r.body.state === 'playing' && r.body.track?.name === 'Blip' && r.body.track.progressMs === 4321 && r.tokens === 1, `${r.text} tokens ${r.tokens}`);
+r = await at(3);
+check('spotify failing at +3 minutes: the stale playing track reads as last played, with no time and no progress', r.body.state === 'recent' && r.body.track?.name === 'Blip' && r.body.track.playedAt === null && !('progressMs' in r.body.track), r.text);
+check('a refused refresh is not retried for 5 minutes', r.tokens === 0, `${r.tokens} token calls`);
+r = await at(61);
+check('spotify failing at +61 minutes: idle', r.res.status === 200 && r.body.state === 'idle' && !r.body.track && r.tokens === 1, `${r.text} tokens ${r.tokens}`);
 Date.now = realNow;
 
 w = await fresh();

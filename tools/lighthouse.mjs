@@ -11,6 +11,8 @@ import { startServer } from './serve.mjs';
 
 const OUT = path.join(path.dirname(fileURLToPath(import.meta.url)), 'out');
 const PORT = 8092;
+// one run normally takes well under a minute; past this it is stuck, and fails rather than hangs
+const RUN_TIMEOUT_MS = 180000;
 const which = process.argv[2];
 const runs = [
   { name: 'desktop', config: desktopConfig },
@@ -28,11 +30,13 @@ try {
       chromePath: chromium.executablePath(),
       chromeFlags: ['--headless=new', ...(process.platform === 'darwin' ? ['--use-angle=metal'] : [])],
     });
-    const result = await lighthouse(
-      `http://localhost:${PORT}/`,
-      { port: chrome.port, output: 'html', onlyCategories: ['performance', 'accessibility', 'best-practices'] },
-      run.config
-    );
+    let timer;
+    const result = await Promise.race([
+      lighthouse(`http://localhost:${PORT}/`, { port: chrome.port, output: 'html', onlyCategories: ['performance', 'accessibility', 'best-practices'] }, run.config),
+      new Promise((resolve, reject) => {
+        timer = setTimeout(() => reject(new Error(`${run.name} run timed out after ${RUN_TIMEOUT_MS / 1000}s`)), RUN_TIMEOUT_MS);
+      }),
+    ]).finally(() => clearTimeout(timer));
     const { categories, audits } = result.lhr;
     await writeFile(path.join(OUT, `lighthouse-${run.name}.html`), result.report);
     const scores = Object.fromEntries(Object.entries(categories).map(([k, v]) => [k, Math.round(v.score * 100)]));
@@ -47,6 +51,9 @@ try {
     chrome.kill();
     chrome = null;
   }
+} catch (err) {
+  console.log(`lighthouse failed: ${err.message}`);
+  failed = true;
 } finally {
   chrome?.kill();
   server.close();

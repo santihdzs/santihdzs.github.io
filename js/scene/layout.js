@@ -11,6 +11,17 @@ const FLARE = 0.25;
 const SIZE_MIN = 0.035;
 const SIZE_MAX = 0.11;
 const CHURN_CAP = Math.log1p(4000);
+// the home view of stars mode always holds a few sharp, pickable stars, whatever the data. near the
+// newest end no two commits sit more than FRONT_STEP apart in depth, so a gap in history cannot leave
+// the home focal band empty, and the first HOME_STARS commits inside that band are drawn in toward
+// the middle of the view. everything else keeps the wide spread.
+const FRONT = 24;
+const FRONT_STEP = 0.25;
+const HOME_BAND = 1.2;
+const HOME_STARS = 8;
+// half extents, per unit of distance, of the middle of the home view (fov 55, well inside the edges)
+const HOME_X = 0.38;
+const HOME_Y = 0.3;
 
 function hashWords(sha) {
   if (/^[0-9a-f]{32,}$/i.test(sha)) {
@@ -39,6 +50,7 @@ export function buildLayout(data) {
   const langs = new Float32Array(n);
   const seeds = new Float32Array(n);
   const baseZ = new Float32Array(n);
+  let homeStars = 0;
 
   for (let i = 0; i < n; i++) {
     const c = commits[i];
@@ -48,13 +60,24 @@ export function buildLayout(data) {
     const age = (newest - c.ts) / span;
     const rank = n > 1 ? i / (n - 1) : 0;
     const t = 0.55 * age + 0.45 * rank;
-    baseZ[i] = -(NEAR + depth * t);
+    let d = NEAR + depth * t;
+    // still monotonic: each step is at most the original one
+    if (i > 0 && i < FRONT) d = Math.min(d, -baseZ[i - 1] + FRONT_STEP);
+    baseZ[i] = -d;
 
-    const r = (0.1 + 0.9 * Math.sqrt(h1)) * (1 + FLARE * t);
     const theta = h2 * Math.PI * 2;
-    positions[i * 3] = Math.cos(theta) * r * RX;
-    positions[i * 3 + 1] = Math.sin(theta) * r * RY;
-    positions[i * 3 + 2] = baseZ[i] + (h3 - 0.5) * jitter;
+    const z = baseZ[i] + (h3 - 0.5) * jitter;
+    if (homeStars < HOME_STARS && Math.abs(-z - STAR_FOCAL) <= HOME_BAND) {
+      homeStars++;
+      const r = 0.15 + 0.85 * Math.sqrt(h1);
+      positions[i * 3] = Math.cos(theta) * r * HOME_X * -z;
+      positions[i * 3 + 1] = Math.sin(theta) * r * HOME_Y * -z;
+    } else {
+      const r = (0.1 + 0.9 * Math.sqrt(h1)) * (1 + FLARE * t);
+      positions[i * 3] = Math.cos(theta) * r * RX;
+      positions[i * 3 + 1] = Math.sin(theta) * r * RY;
+    }
+    positions[i * 3 + 2] = z;
 
     const churn = Math.log1p(c.additions + c.deletions) / CHURN_CAP;
     sizes[i] = SIZE_MIN + (SIZE_MAX - SIZE_MIN) * Math.min(1, Math.max(0, churn));

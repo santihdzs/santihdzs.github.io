@@ -1,6 +1,7 @@
 import { GLSL as OPTICS, SPRITE } from './optics.js';
+import { MAX_LANGS } from './data.js';
 
-export const MAX_LANGS = 8;
+export { MAX_LANGS };
 
 // shared lit sphere shading: sharp stars and the pull request heads use the same light
 export const SPHERE = /* glsl */ `

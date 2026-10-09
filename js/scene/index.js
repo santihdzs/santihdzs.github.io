@@ -22,9 +22,14 @@ const PARALLAX = 0.06;
 const MODE_TIME = 0.8;
 const FLIGHT_TIME = 1.1;
 
-// overscroll exit at the newest end: armed after some travel, a fresh gesture after the camera
-// rests at the edge, wheel distance accumulated against a threshold, reset after a pause
-const EXIT = { arm: 3, rest: 300, threshold: 280, idle: 400, pull: 0.25 };
+// overscroll exit at the newest end, armed after some travel. at the edge a new gesture toward the
+// present starts counting. it is new after a pause of at least gap ms that also breaks the stream's
+// rhythm by rhythm times (spacing past beat ms is already a pause), unless the event after the pause
+// still moves at the stream's own rate, which is a slow frame handing over merged events. it is also
+// new when the rate rebounds to rebound times the low point of a decaying tail, moving at least floor
+// px. an inertial tail or a slowing wheel spin does neither, however long it runs. the gesture's
+// distance accumulates against threshold, more than one 100 px mouse notch, and resets after idle ms
+const EXIT = { arm: 3, gap: 50, rhythm: 2.5, beat: 400, rebound: 2, floor: 6, threshold: 110, idle: 800, pull: 0.25 };
 const HINT = 'click a star, scroll to travel back in time';
 const EXIT_HINT = 'scroll again to return to the page';
 
@@ -89,11 +94,14 @@ export function createStarfield({ data, prs = [], reduced, texture = 'nebula' })
   // everything the field looks like: focal plane, brightness, and the nebula blend (0 page, 1 stars)
   const look = { focal: CONTENT_FOCAL, intensity: 0, nebula: 0 };
   const band = { target: 0, value: 0 };
-  const exit = { armed: false, edgeSince: 0, lastWheel: 0, acc: 0, hint: false };
+  const exit = { armed: false, lastWheel: 0, interval: 0, rate: 0, peak: 0, low: 0, acc: 0, hint: false };
   const travelMin = layout.zOldest + STAR_FOCAL;
   // home is the newest end of the tunnel: its focal plane sits just past the newest commits
   const travelMax = 0;
   const langs = Array.from({ length: MAX_LANGS }, () => ({ hi: 0, lo: 0 }));
+  // the one rule for which stars a language filter keeps. it sets the dimming, which the picker reads,
+  // and it decides what browsing can reach. null keeps everything; "other" is a language like any other
+  const keeps = (filter, lang) => filter === null || lang === filter;
   const pointer = { x: -1, y: -1, nx: 0, ny: 0, overCanvas: false, target: null };
   const parallax = { x: 0, y: 0 };
   const tmp = new THREE.Vector3();
@@ -102,11 +110,16 @@ export function createStarfield({ data, prs = [], reduced, texture = 'nebula' })
   let travelTarget = 0;
   let focus = -1;
   let saved = null;
+  // where an in flight return to the saved position is headed
+  let returning = null;
   let pr = null;
   let ctx = null;
   let flying = false;
   let hover = -1;
+  // the language whose stars are lit (a pin or a legend preview) and the pinned one, which alone
+  // filters browsing
   let langFilter = null;
+  let browseFilter = null;
   let drift = 0;
   let time = 0;
   let last = performance.now();
@@ -209,16 +222,48 @@ export function createStarfield({ data, prs = [], reduced, texture = 'nebula' })
     return { x: s.x + view.left, y: s.y + view.top, dist: s.dist, size: d.size, coc: d.coc };
   }
 
+  const browsable = (i) => keeps(browseFilter, layout.langs[i]);
+
+  // the nearest browsable commit from list position `at`, walking `dir`; -1 when there is none
+  function nearestIn(list, at, dir) {
+    for (let k = at + dir; k >= 0 && k < list.length; k += dir) if (browsable(list[k])) return list[k];
+    return -1;
+  }
+
+  // commits run newest first, so stepping toward the present walks down the index
+  function nearestCommit(i, dir) {
+    for (let j = i - dir; j >= 0 && j < layout.n; j -= dir) if (browsable(j)) return j;
+    return -1;
+  }
+
+  function firstBrowsable() {
+    for (let j = 0; j < layout.n; j++) if (browsable(j)) return j;
+    return -1;
+  }
+
+  // counters count within the pinned language; a commit outside it has no place in that count
   function navFor(i) {
     const list = repoOrder.get(data.commits[i].repo);
+    let total = 0;
+    let index = 0;
+    for (let j = 0; j < layout.n; j++) {
+      if (!browsable(j)) continue;
+      total++;
+      if (j >= i) index++;
+    }
     return {
-      canPrev: repoPos[i] > 0,
-      canNext: repoPos[i] < list.length - 1,
+      canPrev: nearestIn(list, repoPos[i], -1) >= 0,
+      canNext: nearestIn(list, repoPos[i], 1) >= 0,
       repoIndex: repoPos[i] + 1,
       repoTotal: list.length,
-      index: layout.n - i,
-      total: layout.n,
+      index: browsable(i) ? index : null,
+      total,
     };
+  }
+
+  function syncBrowse() {
+    browse.disabled = firstBrowsable() < 0;
+    if (focus >= 0 && card.isOpen && card.kind === 'commit') card.setNav(navFor(focus));
   }
 
   function setHint(text, visible) {
@@ -232,8 +277,10 @@ export function createStarfield({ data, prs = [], reduced, texture = 'nebula' })
 
   function focusStar(i, opener) {
     if (i < 0 || i >= layout.n || pr) return;
-    // saved is the camera before the first flight, chained flights keep it
-    if (focus < 0) saved = { x: cam.x, y: cam.y, z: cam.z };
+    // saved is the camera before the first flight, chained flights keep it. a flight started on the way back
+    // keeps the place the camera was returning to, never a point along the way
+    if (focus < 0) saved = returning ?? { x: cam.x, y: cam.y, z: cam.z };
+    returning = null;
     focus = i;
     flying = true;
     setHover(-1);
@@ -263,6 +310,7 @@ export function createStarfield({ data, prs = [], reduced, texture = 'nebula' })
     card.hide();
     const back = saved ?? { x: 0, y: 0, z: travelTarget };
     saved = null;
+    returning = back;
     const duration = still() ? 0 : FLIGHT_TIME;
     flying = true;
     gsap.to(cam, {
@@ -272,6 +320,7 @@ export function createStarfield({ data, prs = [], reduced, texture = 'nebula' })
       overwrite: true,
       onComplete: () => {
         flying = false;
+        returning = null;
         travelTarget = cam.z;
       },
     });
@@ -285,7 +334,6 @@ export function createStarfield({ data, prs = [], reduced, texture = 'nebula' })
     pr = s;
     ctx = {
       mode,
-      scrollY: window.scrollY,
       cam: { x: cam.x, y: cam.y, z: cam.z },
       travelTarget,
       look: { focal: look.focal, intensity: look.intensity, nebula: look.nebula },
@@ -341,16 +389,11 @@ export function createStarfield({ data, prs = [], reduced, texture = 'nebula' })
     api.onPr?.(false, back, restore);
   }
 
-  // scope "repo" walks one repo chronologically, "all" walks every commit
+  // scope "repo" walks one repo chronologically, "all" walks every commit. both skip whatever the
+  // pinned language leaves out and stop at the ends
   function step(scope, dir) {
     if (focus < 0) return;
-    let target = -1;
-    if (scope === 'repo') {
-      const list = repoOrder.get(data.commits[focus].repo);
-      target = list[repoPos[focus] + dir] ?? -1;
-    } else {
-      target = focus - dir;
-    }
+    const target = scope === 'repo' ? nearestIn(repoOrder.get(data.commits[focus].repo), repoPos[focus], dir) : nearestCommit(focus, dir);
     if (target >= 0 && target < layout.n) focusStar(target);
   }
 
@@ -366,10 +409,6 @@ export function createStarfield({ data, prs = [], reduced, texture = 'nebula' })
     travelTarget = Math.min(travelMax, Math.max(travelMin, travelTarget + dz));
     if (travelMax - travelTarget >= EXIT.arm) exit.armed = true;
     if (dz < 0) fadeHint();
-  }
-
-  function atRestingEdge(now) {
-    return exit.edgeSince > 0 && now - exit.edgeSince >= EXIT.rest;
   }
 
   function pushExit(amount) {
@@ -407,16 +446,37 @@ export function createStarfield({ data, prs = [], reduced, texture = 'nebula' })
     api.onOverscrollExit?.();
   }
 
+  // reads one wheel event into the stream's timing and rate envelope (px per ms: its peak, then the low
+  // point of its decay). true when the event starts a new gesture
+  function newGesture(now, mag) {
+    const gap = now - exit.lastWheel;
+    const rate = mag / Math.max(gap, 8);
+    const streaming = exit.interval < EXIT.beat && gap < EXIT.beat;
+    const paused = gap >= EXIT.gap && gap >= Math.min(exit.interval, EXIT.beat) * EXIT.rhythm;
+    const merged = streaming && rate >= exit.rate * 0.5 && rate <= exit.rate * 2;
+    const rebound = streaming && exit.low <= exit.peak / 2 && rate >= exit.low * EXIT.rebound && mag >= EXIT.floor;
+    const fresh = (paused && !merged) || rebound;
+    if (fresh || !streaming || rate > exit.peak) {
+      exit.peak = rate;
+      exit.low = rate;
+    } else {
+      exit.low = Math.min(exit.low, rate);
+    }
+    exit.rate = rate;
+    exit.interval = gap;
+    exit.lastWheel = now;
+    return fresh;
+  }
+
   function onWheel(e) {
     if (mode !== 'stars') return;
-    const now = performance.now();
-    const quiet = now - exit.lastWheel;
-    exit.lastWheel = now;
-    if (busy() || flying) return;
     const unit = e.deltaMode === 1 ? 16 : e.deltaMode === 2 ? view.h : 1;
     const dy = e.deltaY * unit;
-    // toward the present while parked at the newest end: a fresh gesture can return to the page
-    if (dy < 0 && exit.armed && (exit.acc > 0 || (atRestingEdge(now) && quiet >= EXIT.rest))) {
+    // event time rather than handling time
+    const fresh = newGesture(e.timeStamp || performance.now(), Math.abs(dy));
+    if (busy() || flying) return;
+    // toward the present at the newest end: a new gesture, and the rest of it, can return to the page
+    if (dy < 0 && exit.armed && travelTarget >= travelMax && (exit.acc > 0 || fresh)) {
       pushExit(-dy);
       return;
     }
@@ -467,9 +527,15 @@ export function createStarfield({ data, prs = [], reduced, texture = 'nebula' })
     travelBy(dy * (layout.depth / 1200));
   }
 
+  // a press on the field never takes focus away from an open card
+  function onMouseDown(e) {
+    if (card.isOpen) e.preventDefault();
+  }
+
   function onPointerDown(e) {
     if (mode !== 'stars' || e.pointerType === 'mouse') return;
-    drag = { id: e.pointerId, y: e.clientY, moved: 0, fresh: atRestingEdge(performance.now()) };
+    // a touch is always a new gesture; it can return to the page if it starts at the newest end
+    drag = { id: e.pointerId, y: e.clientY, moved: 0, fresh: exit.armed && travelTarget >= travelMax };
   }
 
   function onPointerUp(e) {
@@ -526,7 +592,9 @@ export function createStarfield({ data, prs = [], reduced, texture = 'nebula' })
 
   function updateReadout() {
     if (mode !== 'stars') return;
-    const label = formatMonth(layout.timeAt(cam.z - uniforms.uFocal.value));
+    // the most recent layer in front of the camera, as far ahead as the newest commit sits from home:
+    // the newest commit's month at home, then the layer the camera is about to pass while travelling
+    const label = formatMonth(layout.timeAt(cam.z + layout.zNewest));
     if (label !== lastMonth) {
       lastMonth = label;
       readout.textContent = label;
@@ -546,11 +614,6 @@ export function createStarfield({ data, prs = [], reduced, texture = 'nebula' })
     if (mode === 'stars' && !busy() && !flying) {
       // travel eases, except under reduced motion where it jumps
       cam.z += (travelTarget - cam.z) * (rm ? 1 : 1 - Math.exp(-dt * 4.5));
-      const resting = travelTarget >= travelMax && Math.abs(cam.z - travelMax) < 0.02;
-      if (!resting) exit.edgeSince = 0;
-      else if (!exit.edgeSince) exit.edgeSince = now;
-    } else {
-      exit.edgeSince = 0;
     }
     if (exit.acc > 0 && !drag && now - exit.lastWheel > EXIT.idle) releaseExit();
     if (exit.hint && exit.acc === 0 && !(travelTarget >= travelMax)) hideExitHint();
@@ -634,6 +697,8 @@ export function createStarfield({ data, prs = [], reduced, texture = 'nebula' })
   }
 
   function onContextRestored() {
+    // three rebuilds its state on restore, which resets the clear color to black
+    renderer.setClearColor(0x06080b, 1);
     lost = false;
     signature = '';
   }
@@ -645,10 +710,12 @@ export function createStarfield({ data, prs = [], reduced, texture = 'nebula' })
   document.addEventListener('keydown', onKey);
   document.addEventListener('visibilitychange', onVisibility);
   canvas.addEventListener('pointerdown', onPointerDown);
+  canvas.addEventListener('mousedown', onMouseDown);
   canvas.addEventListener('click', onCanvasClick);
   canvas.addEventListener('webglcontextlost', onContextLost);
   canvas.addEventListener('webglcontextrestored', onContextRestored);
-  browse.addEventListener('click', () => focusStar(0, browse));
+  browse.addEventListener('click', () => focusStar(firstBrowsable(), browse));
+  syncBrowse();
 
   applySize();
   resizer.observe(canvas);
@@ -659,14 +726,8 @@ export function createStarfield({ data, prs = [], reduced, texture = 'nebula' })
   const api = {
     onPr: null,
     onOverscrollExit: null,
-    get mode() {
-      return mode;
-    },
     get prOpen() {
       return pr !== null;
-    },
-    get prOrigin() {
-      return ctx?.mode ?? null;
     },
     setMode(next) {
       if (next === mode) return;
@@ -675,7 +736,6 @@ export function createStarfield({ data, prs = [], reduced, texture = 'nebula' })
       mode = next;
       exit.armed = false;
       exit.acc = 0;
-      exit.edgeSince = 0;
       exit.hint = false;
       band.target = 0;
       if (next === 'stars') {
@@ -701,6 +761,7 @@ export function createStarfield({ data, prs = [], reduced, texture = 'nebula' })
         saved = null;
         card.hide();
       }
+      returning = null;
       setHover(-1);
       travelTarget = 0;
       const duration = still() ? 0 : hadCard ? FLIGHT_TIME : MODE_TIME;
@@ -719,25 +780,22 @@ export function createStarfield({ data, prs = [], reduced, texture = 'nebula' })
       });
       if (!duration) flying = false;
     },
-    focusStar,
     closeCard() {
       if (pr) closePr();
       else unfocus();
     },
-    get cardOpen() {
-      return card.isOpen;
-    },
-    get languageFilter() {
-      return langFilter;
-    },
-    setLanguageFocus(index) {
+    // index lights stars (a pin or a legend preview); pinned, when given, is what browsing follows
+    setLanguageFocus(index, pinned = index) {
       langFilter = index;
       const duration = still() ? 0 : 0.25;
       langs.forEach((s, i) => {
-        const on = index !== null && i === index;
-        const off = index !== null && i !== index;
-        gsap.to(s, { hi: on ? 1 : 0, lo: off ? 1 : 0, duration, ease: 'power2.out', overwrite: true });
+        const on = index !== null && keeps(index, i);
+        gsap.to(s, { hi: on ? 1 : 0, lo: keeps(index, i) ? 0 : 1, duration, ease: 'power2.out', overwrite: true });
       });
+      if (pinned !== browseFilter) {
+        browseFilter = pinned;
+        syncBrowse();
+      }
     },
     dispose() {
       stop();
@@ -757,6 +815,8 @@ export function createStarfield({ data, prs = [], reduced, texture = 'nebula' })
       field.dispose();
       nebula?.dispose();
       renderer.dispose();
+      // hand the gpu context back now rather than whenever the canvas is collected
+      renderer.forceContextLoss();
       canvas.remove();
       if (window.__starfield === debug) delete window.__starfield;
     },
@@ -775,6 +835,8 @@ export function createStarfield({ data, prs = [], reduced, texture = 'nebula' })
     pickAt: (x, y, exclude = -1) => pickAt(x, y, exclude),
     streak: () => streaks.debug(),
     fireStreak: () => streaks.fireNow(),
+    // pins a language as the legend would, including one with no commits
+    pin: (index) => api.setLanguageFocus(index),
     nebulaColors: () => nebula?.colors() ?? null,
     state: () => ({
       mode,
@@ -784,6 +846,8 @@ export function createStarfield({ data, prs = [], reduced, texture = 'nebula' })
       pr: pr ? pr.pr.url : null,
       ctx: ctx && JSON.parse(JSON.stringify(ctx)),
       filter: langFilter,
+      browseFilter,
+      browseDisabled: browse.disabled,
       cam: { x: cam.x, y: cam.y, z: cam.z },
       camera: { x: camera.position.x, y: camera.position.y, z: camera.position.z },
       saved: saved && { x: saved.x, y: saved.y, z: saved.z },

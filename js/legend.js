@@ -38,7 +38,8 @@ export function createLegend({ data, scene, reduced }) {
 
   function render() {
     const active = hovered ?? focused ?? pinned;
-    scene.setLanguageFocus(active === 'all' ? null : active);
+    // previews only light the stars; browsing follows the pin alone
+    scene.setLanguageFocus(active === 'all' ? null : active, pinned);
     const lit = active === 'all' ? null : active;
     root.classList.toggle('is-filtering', lit !== null);
     for (const b of buttons) b.classList.toggle('is-lit', Number(b.dataset.lang) === lit);

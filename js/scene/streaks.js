@@ -4,9 +4,9 @@ import { GLSL as OPTICS, SPRITE } from './optics.js';
 import { SPHERE } from './shaders.js';
 
 // the cadence: one streak every 10 to 20 seconds, never two at once
-export const STREAK_INTERVAL = [10, 20];
+const STREAK_INTERVAL = [10, 20];
 // gold is its own palette. it never follows the accent or the language filter.
-export const GOLD = { head: [1.0, 0.83, 0.5], tail: [0.97, 0.78, 0.42] };
+const GOLD = { head: [1.0, 0.83, 0.5], tail: [0.97, 0.78, 0.42] };
 
 const HEAD_SIZE = 0.05;
 const SPAWN = 9;
@@ -87,7 +87,7 @@ function shuffled(n, avoid) {
 // document level against the projected head and tail, so they stay reachable over the page.
 export function createStreaks({ prs, reduced, scene, camera, view, uniforms, canFire, onHit }) {
   const root = document.documentElement;
-  const inert = { pointer() {}, frame() {}, pause() {}, resume() {}, setPaused() {}, dispose() {}, fireNow: () => false, get active() { return null; }, screen: () => null, headWorld: () => null, debug: () => null };
+  const inert = { pointer() {}, frame() {}, pause() {}, resume() {}, dispose() {}, fireNow: () => false, screen: () => null, headWorld: () => null, debug: () => null };
   if (!prs.length) return inert;
 
   const headGeo = new THREE.BufferGeometry();
@@ -136,13 +136,11 @@ export function createStreaks({ prs, reduced, scene, camera, view, uniforms, can
   let last = -1;
   let timer = 0;
   let current = null;
-  let paused = false;
   let catching = false;
   let lastPointer = null;
 
   function schedule(ms = (STREAK_INTERVAL[0] + Math.random() * (STREAK_INTERVAL[1] - STREAK_INTERVAL[0])) * 1000) {
     clearTimeout(timer);
-    if (paused) return;
     timer = setTimeout(fire, ms);
   }
 
@@ -158,7 +156,7 @@ export function createStreaks({ prs, reduced, scene, camera, view, uniforms, can
   }
 
   function fire() {
-    if (paused || reduced.matches || document.hidden) return schedule();
+    if (reduced.matches || document.hidden) return schedule();
     if (!canFire()) return schedule(3000);
     if (!bag.length) bag = shuffled(prs.length, last);
     const index = bag.pop();
@@ -244,9 +242,6 @@ export function createStreaks({ prs, reduced, scene, camera, view, uniforms, can
   schedule();
 
   return {
-    get active() {
-      return current;
-    },
     pointer(x, y, target) {
       lastPointer = { x, y, target };
       setCatching(!!current && !current.focused && !blocked(target) && hit(x, y));
@@ -313,13 +308,6 @@ export function createStreaks({ prs, reduced, scene, camera, view, uniforms, can
     },
     screen() {
       return current ? { x: current.screen.x, y: current.screen.y, size: current.screen.size } : null;
-    },
-    setPaused(on) {
-      paused = on;
-      if (on) {
-        clearTimeout(timer);
-        if (current && !current.focused) finish(false);
-      } else if (!current) schedule();
     },
     // debug only: launch one now instead of waiting for the cadence
     fireNow() {

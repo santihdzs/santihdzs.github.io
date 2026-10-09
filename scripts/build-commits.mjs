@@ -39,6 +39,8 @@ const SLOT_PREFS = {
 };
 const HUE_SLOTS = 8;
 const OTHER_SLOT = 8;
+// the site's shader holds 8 languages: up to 7 named ones plus "other"
+const MAX_NAMED_LANGUAGES = 7;
 
 const args = process.argv.slice(2);
 const flag = (name) => args.includes(name);
@@ -107,13 +109,18 @@ function assignLanguages(repos, commits, maxLanguages) {
 }
 
 async function loadConfig() {
+  let config;
   try {
     const raw = JSON.parse(await readFile(CONFIG_PATH, 'utf8'));
-    return { ...DEFAULT_CONFIG, ...raw };
+    config = { ...DEFAULT_CONFIG, ...raw };
   } catch (err) {
     if (err.code !== 'ENOENT') throw new Error(`could not read ${CONFIG_PATH}: ${err.message}`);
-    return DEFAULT_CONFIG;
+    config = DEFAULT_CONFIG;
   }
+  if (!(Number(config.maxLanguages) <= MAX_NAMED_LANGUAGES)) {
+    throw new Error(`maxLanguages is at most ${MAX_NAMED_LANGUAGES} (the site shows 8 languages, "other" included), got ${JSON.stringify(config.maxLanguages)}`);
+  }
+  return config;
 }
 
 function resolveToken() {
@@ -402,9 +409,15 @@ function assemble({ user, mock, perRepo, matcher }, config) {
       c.additions,
       c.deletions,
       c.files,
-      c.message.length > MSG_MAX ? `${c.message.slice(0, MSG_MAX - 3).trimEnd()}...` : c.message,
+      truncate(c.message, MSG_MAX),
     ]),
   };
+}
+
+// by code point, so an emoji or other astral character is never cut in half
+function truncate(text, max) {
+  const chars = Array.from(text);
+  return chars.length > max ? `${chars.slice(0, max - 3).join('').trimEnd()}...` : text;
 }
 
 // one commit per line keeps daily diffs small and readable

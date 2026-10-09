@@ -1,3 +1,7 @@
+// the most languages the field can tell apart; the shader sizes its per language arrays from it. it lives here,
+// in a module with no imports, so the data fetch can start one round trip after main.js asks for it
+export const MAX_LANGS = 8;
+
 // decodes the compact data/commits.json shape into plain objects
 export async function loadCommits(url) {
   const res = await fetch(url);
@@ -6,13 +10,23 @@ export async function loadCommits(url) {
 }
 
 export function decode(raw) {
-  const languages = (raw.languages ?? []).map((l, index) => ({ name: String(l.name), slot: l.slot | 0, index, count: 0 }));
-  if (!languages.length) languages.push({ name: 'other', slot: 8, index: 0, count: 0 });
+  const listed = (raw.languages ?? []).map((l) => ({ name: String(l.name), slot: l.slot | 0 }));
+  // the shader and the picker hold MAX_LANGS languages: past that, the first named ones keep their
+  // entries and everything else folds into "other", so no star ever indexes past the end
+  const folding = listed.length > MAX_LANGS;
+  const own = listed.map((l, i) => i);
+  if (folding) own.splice(0, own.length, ...own.filter((i) => listed[i].name !== 'other').slice(0, MAX_LANGS - 1));
+  const languages = own.map((i, index) => ({ ...listed[i], index, count: 0 }));
+  if (folding || !languages.length) languages.push({ name: 'other', slot: 8, index: languages.length, count: 0 });
   const fallback = languages.length - 1;
+  const langOf = (i) => {
+    const k = own.indexOf(Number(i));
+    return k >= 0 ? k : fallback;
+  };
 
   const repos = (raw.repos ?? []).map((r) => ({
     name: String(r.name),
-    lang: languages[r.lang] ? r.lang : fallback,
+    lang: listed[r.lang] ? langOf(r.lang) : fallback,
     primary: r.primary ?? null,
   }));
 

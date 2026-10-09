@@ -203,7 +203,8 @@ export function createNebula() {
     mesh,
     update(time, cam, aspect, blend) {
       const a = accentChannels();
-      const key = `${a.r.toFixed(1)},${a.g.toFixed(1)},${a.b.toFixed(1)}`;
+      // exact channels: a rounded key could skip the last step of a tween and leave the colors a hair off
+      const key = `${a.r},${a.g},${a.b}`;
       if (key !== lastKey) {
         lastKey = key;
         recolor(a);

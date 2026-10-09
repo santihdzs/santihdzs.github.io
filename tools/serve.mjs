@@ -32,32 +32,53 @@ export function startServer(port = PORT) {
       res.writeHead(301, { location: '/sub/' }).end();
       return;
     }
-    let rel = decodeURIComponent(url.pathname.slice(prefix.length));
+    let rel;
+    try {
+      rel = decodeURIComponent(url.pathname.slice(prefix.length));
+    } catch {
+      // a malformed escape names no file
+      await notFound(req, res);
+      return;
+    }
     if (rel === '' || rel.endsWith('/')) rel += 'index.html';
     const file = path.join(ROOT, rel);
-    if (!file.startsWith(ROOT) || rel.split('/').some((s) => s.startsWith('.') && s !== '.well-known') || rel.startsWith('tools/')) {
-      res.writeHead(404).end('not found');
+    const inside = path.relative(ROOT, file);
+    const outside = inside === '' || inside === '..' || inside.startsWith(`..${path.sep}`) || path.isAbsolute(inside);
+    if (outside || rel.split('/').some((s) => s.startsWith('.') && s !== '.well-known') || rel.startsWith('tools/')) {
+      await notFound(req, res);
       return;
     }
     try {
       const info = await stat(file);
       if (!info.isFile()) throw new Error('not a file');
-      let body = await readFile(file);
-      const ext = path.extname(file);
-      const headers = { 'content-type': TYPES[ext] ?? 'application/octet-stream', 'cache-control': 'no-cache' };
-      if (COMPRESS.has(ext) && /\bgzip\b/.test(req.headers['accept-encoding'] ?? '')) {
-        body = gzipSync(body);
-        headers['content-encoding'] = 'gzip';
-      }
-      res.writeHead(200, headers).end(body);
+      send(req, res, 200, await readFile(file), path.extname(file));
     } catch {
-      res.writeHead(404).end('not found');
+      await notFound(req, res);
     }
   });
-  return new Promise((resolve) => server.listen(port, () => resolve(server)));
+  // loopback only: the repo, tools and all, is never served to the network
+  return new Promise((resolve) => server.listen(port, '127.0.0.1', () => resolve(server)));
+}
+
+function send(req, res, status, body, ext) {
+  const headers = { 'content-type': TYPES[ext] ?? 'application/octet-stream', 'cache-control': 'no-cache' };
+  if (COMPRESS.has(ext) && /\bgzip\b/.test(req.headers['accept-encoding'] ?? '')) {
+    body = gzipSync(body);
+    headers['content-encoding'] = 'gzip';
+  }
+  res.writeHead(status, headers).end(body);
+}
+
+// like github pages: unknown paths get 404.html, with a real 404 status, at the url that was asked for
+async function notFound(req, res) {
+  try {
+    send(req, res, 404, await readFile(path.join(ROOT, '404.html')), '.html');
+  } catch {
+    res.writeHead(404).end('not found');
+  }
 }
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
   await startServer();
-  console.log(`serving ${ROOT}\n  http://localhost:${PORT}/\n  http://localhost:${PORT}/sub/`);
+  console.log(`serving ${ROOT}\n  http://127.0.0.1:${PORT}/\n  http://127.0.0.1:${PORT}/sub/`);
 }

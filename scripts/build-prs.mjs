@@ -15,6 +15,8 @@ const API = 'https://api.github.com';
 const TITLE_MAX = 140;
 const AVATAR_SIZE = 96;
 const EXT = { 'image/png': 'png', 'image/jpeg': 'jpg', 'image/gif': 'gif', 'image/webp': 'webp' };
+// a github login, the only shape an owner may take before it becomes a file name
+const LOGIN = /^[a-z0-9][a-z0-9-]{0,38}$/i;
 
 const DEFAULT_CONFIG = { user: 'santihdzs', allow: [], deny: [], excludeDrafts: true };
 
@@ -111,6 +113,7 @@ async function readExisting() {
 }
 
 async function downloadLogo(token, owner) {
+  if (!LOGIN.test(owner)) throw new Error('not a github login');
   const info = await request(token, `${API}/users/${encodeURIComponent(owner)}`);
   if (!info?.avatar_url) throw new Error('no avatar url');
   const url = new URL(info.avatar_url);
@@ -126,6 +129,16 @@ async function downloadLogo(token, owner) {
   const old = await readFile(file).catch(() => null);
   if (!old || !old.equals(bytes)) await writeFile(file, bytes);
   return `./assets/orgs/${owner.toLowerCase()}.${ext}`;
+}
+
+// the avatar a previous run committed for this owner, if any
+async function existingLogo(owner) {
+  if (!LOGIN.test(owner)) return null;
+  const files = await readdir(LOGO_DIR).catch(() => []);
+  const name = Object.values(EXT)
+    .map((ext) => `${owner.toLowerCase()}.${ext}`)
+    .find((f) => files.includes(f));
+  return name ? `./assets/orgs/${name}` : null;
 }
 
 async function pruneLogos(keep) {
@@ -185,14 +198,16 @@ async function buildReal(config) {
     }
   }
 
-  // one avatar per owner; a failed download leaves the card to its monogram
+  // one avatar per owner. a failed download keeps the avatar already committed, so a transient failure
+  // never deletes it; with none, the card shows its monogram
   const logos = new Map();
   for (const owner of [...new Set(prs.map((p) => p.owner))]) {
     try {
       logos.set(owner, await downloadLogo(token, owner));
     } catch (err) {
-      log(`${owner}: avatar failed (${err.message}), the card will show a monogram`);
-      logos.set(owner, null);
+      const kept = await existingLogo(owner);
+      log(`${owner}: avatar failed (${err.message}), ${kept ? 'keeping the committed one' : 'the card will show a monogram'}`);
+      logos.set(owner, kept);
     }
   }
   await pruneLogos(new Set([...logos.values()].filter(Boolean).map((p) => path.basename(p))));
@@ -228,6 +243,12 @@ function buildMock(config) {
   };
 }
 
+// by code point, so an emoji or other astral character is never cut in half
+function truncate(text, max) {
+  const chars = Array.from(text);
+  return chars.length > max ? `${chars.slice(0, max - 3).join('').trimEnd()}...` : text;
+}
+
 function serialize(data) {
   const lines = ['{'];
   for (const k of ['generated', 'user', 'mock']) lines.push(`  ${JSON.stringify(k)}: ${JSON.stringify(data[k])},`);
@@ -241,7 +262,7 @@ async function main() {
   const config = await loadConfig();
   const raw = args.includes('--mock') ? buildMock(config) : await buildReal(config);
   const prs = raw.prs
-    .map((p) => ({ ...p, title: p.title.length > TITLE_MAX ? `${p.title.slice(0, TITLE_MAX - 3).trimEnd()}...` : p.title }))
+    .map((p) => ({ ...p, title: truncate(p.title, TITLE_MAX) }))
     .sort((a, b) => b.createdAt.localeCompare(a.createdAt) || `${a.owner}/${a.repo}#${a.number}`.localeCompare(`${b.owner}/${b.repo}#${b.number}`));
   const data = { generated: null, user: raw.user, mock: raw.mock, prs };
 

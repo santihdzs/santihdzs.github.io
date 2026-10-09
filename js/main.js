@@ -1,14 +1,17 @@
-// entry point. narrow screens run nothing beyond this file; wide screens lazily load
-// the reveals, the starfield with its commit and pull request data and controls, then the
-// now playing satellite.
+// entry point. wide screens lazily load the reveals, the starfield with its commit and pull request
+// data and controls, then the now playing satellite. narrow screens load only the small narrow view:
+// a 2d sky and the spotify card, never three.js, gsap or any commit data.
 
-const wide = matchMedia('(min-width: 721px)');
+// the one breakpoint: phones, and phones in landscape (short touch screens). every narrow @media block in
+// css repeats this exact query text, so js and css always agree, fractional widths included
+const narrowView = matchMedia('(max-width: 720px), (max-height: 500px) and (pointer: coarse) and (orientation: landscape)');
 const reduced = matchMedia('(prefers-reduced-motion: reduce)');
 const saveData = navigator.connection?.saveData === true;
 
 let pageReady = false;
 let session = null;
 let generation = 0;
+let narrow = null;
 
 // the copyright is static in the page; the dot and the stat join it once the data loads
 function showStats(data) {
@@ -34,12 +37,15 @@ function showStats(data) {
 
 async function startScene(s, id) {
   if (saveData) return;
-  const [{ loadCommits, loadPrs }, { createStarfield }, { textureMode }] = await Promise.all([
-    import('./scene/data.js'),
+  // the data downloads while three.js and the scene modules load
+  const loadData = import('./scene/data.js').then(({ loadCommits, loadPrs }) =>
+    Promise.all([loadCommits('./data/commits.json'), loadPrs('./data/prs.json')])
+  );
+  const [[data, prs], { createStarfield }, { textureMode }] = await Promise.all([
+    loadData,
     import('./scene/index.js'),
     import('./texture.js'),
   ]);
-  const [data, prs] = await Promise.all([loadCommits('./data/commits.json'), loadPrs('./data/prs.json')]);
   if (id !== generation) return;
   showStats(data);
 
@@ -96,10 +102,33 @@ function leaveWide() {
   s.scene?.dispose();
 }
 
-function sync() {
-  if (wide.matches) enterWide();
-  else leaveWide();
+async function enterNarrow() {
+  if (narrow) return;
+  const n = (narrow = {});
+  try {
+    const { startNarrow } = await import('./narrow.js');
+    if (narrow !== n) return;
+    n.dispose = startNarrow({ saveData });
+  } catch {
+    // the links stand on their own
+  }
 }
 
-wide.addEventListener('change', sync);
+function leaveNarrow() {
+  const n = narrow;
+  narrow = null;
+  n?.dispose?.();
+}
+
+function sync() {
+  if (narrowView.matches) {
+    leaveWide();
+    enterNarrow();
+  } else {
+    leaveNarrow();
+    enterWide();
+  }
+}
+
+narrowView.addEventListener('change', sync);
 sync();

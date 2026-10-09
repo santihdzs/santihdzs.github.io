@@ -1,9 +1,12 @@
 // dev only browser checks. starts its own server, drives chromium, prints pass/fail.
 // usage: node tools/check.mjs [section ...]
-// sections: static load mobile interact reduced robust perf contrast align pick overscroll chain cardlayout rocket texture accent satellite
-//           cards prs exits blend nebcolor starscontrast live
+// sections: static load mobile interact reduced robust perf contrast align pick overscroll chain browse narrow cardlayout rocket texture accent satellite
+//           cards prs exits blend nebcolor starscontrast breakpoint fixes serve print live
+// live calls the real now playing worker, so it only runs when named or with CHECK_LIVE=1. every other run answers
+// the worker's url with a local idle reply and never reaches it.
 import { chromium } from 'playwright';
-import { readFile, readdir, mkdir } from 'node:fs/promises';
+import { readFile, readdir, mkdir, writeFile } from 'node:fs/promises';
+import { inflateSync } from 'node:zlib';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { startServer } from './serve.mjs';
@@ -14,6 +17,8 @@ const PORT = 8091;
 const ORIGIN = `http://localhost:${PORT}`;
 const only = process.argv.slice(2);
 const want = (s) => !only.length || only.includes(s);
+const wantLive = only.includes('live') || process.env.CHECK_LIVE === '1';
+const PROD_WORKER = 'https://now-playing.santihdzs.workers.dev/**';
 const results = [];
 const EM_DASH = String.fromCharCode(0x2014);
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -25,6 +30,21 @@ function check(name, ok, detail = '') {
 
 // the real gpu on macos, software gl elsewhere
 const gpuLaunch = process.platform === 'darwin' ? { channel: 'chromium', args: ['--use-angle=metal'] } : {};
+
+// every context of a browser launched here answers the production worker with an idle reply, so checks never
+// reach it. the live section lifts this per context with unroute(PROD_WORKER)
+async function launch(options) {
+  const browser = await chromium.launch(options);
+  const newContext = browser.newContext.bind(browser);
+  browser.newContext = async (opts) => {
+    const context = await newContext(opts);
+    await context.route(PROD_WORKER, (route) =>
+      route.fulfill({ status: 200, contentType: 'application/json', headers: { 'access-control-allow-origin': '*' }, body: '{"state":"idle"}' })
+    );
+    return context;
+  };
+  return browser;
+}
 
 async function open(browser, url, { width = 1440, height = 900, dsf = 1, reduced = false, init } = {}) {
   const context = await browser.newContext({
@@ -97,13 +117,18 @@ async function staticChecks() {
   for (const f of files) {
     const text = await readFile(f, 'utf8');
     if (text.includes(EM_DASH)) emDash.push(path.relative(ROOT, f));
-    if (/\.(html|css|js)$/.test(f) && !f.includes(`${path.sep}tools${path.sep}`) && !f.includes(`${path.sep}scripts${path.sep}`)) {
+    // 404.html is served at whatever path was requested, so it alone must use root absolute paths (checked below)
+    const notFoundPage = path.relative(ROOT, f) === '404.html';
+    if (!notFoundPage && /\.(html|css|js)$/.test(f) && !f.includes(`${path.sep}tools${path.sep}`) && !f.includes(`${path.sep}scripts${path.sep}`)) {
       const bad = text.match(/(?:src|href)="\/(?!\/)|url\(['"]?\/(?!\/)|from ['"]\/|import\(['"]\/|fetch\(['"]\//g);
       if (bad) absolute.push(`${path.relative(ROOT, f)}: ${bad.join(', ')}`);
     }
   }
   check('no em dashes in authored files', !emDash.length, emDash.join(', '));
   check('no root absolute paths in site files', !absolute.length, absolute.join('; '));
+  const page404 = await readFile(path.join(ROOT, '404.html'), 'utf8');
+  const relative404 = page404.match(/(?:src|href)="(?!\/|#|https?:)[^"]*"/g) ?? [];
+  check('404.html uses only root absolute paths', !relative404.length, relative404.join(', '));
   const html = await readFile(path.join(ROOT, 'index.html'), 'utf8');
   check('exactly one h1', (html.match(/<h1\b/g) ?? []).length === 1);
   check('no canonical, cname or og:image', !/rel="canonical"|og:image/.test(html));
@@ -128,11 +153,11 @@ async function loadChecks(gpu) {
         await page.screenshot({ path: `${OUT}/${shot}-full.png`, fullPage: true });
       }
       // data: and blob: urls are in memory, not network requests. the one runtime exception is now playing:
-      // the worker and spotify's image host, on wide screens only
+      // the worker and spotify's image host (the satellite on wide screens, the spotify card on narrow ones)
       const NOW_PLAYING_HOSTS = ['now-playing.santihdzs.workers.dev', 'i.scdn.co'];
       const external = requests.filter((u) => {
         if (u.startsWith(ORIGIN) || u.startsWith('data:') || u.startsWith('blob:')) return false;
-        return !(w > 720 && NOW_PLAYING_HOSTS.includes(new URL(u).host));
+        return !NOW_PLAYING_HOSTS.includes(new URL(u).host);
       });
       const outside = requests.filter((u) => u.startsWith(ORIGIN) && base === '/sub/' && !u.startsWith(ORIGIN + '/sub/'));
       check(`${tag}: console clean`, !logs.length, logs.join(' | '));
@@ -146,14 +171,14 @@ async function loadChecks(gpu) {
         );
         check(`${tag}: every reveal ends visible`, hidden === 0, `${hidden} still hidden`);
       } else {
-        const used = requests.filter((u) => /three|gsap|commits\.json|prs\.json|scene\//.test(u));
-        check(`${tag}: mobile loads no three, gsap, scene, commit or pull request data`, !used.length, used.join(', '));
-        const canvas = await page.locator('canvas').count();
-        check(`${tag}: mobile has no canvas`, canvas === 0);
+        const used = requests.filter((u) => /three|gsap|commits\.json|prs\.json|scene\/|ScrollTrigger|satellite/.test(u));
+        check(`${tag}: mobile loads no three, gsap, scrolltrigger, scene, satellite, commit or pull request data`, !used.length, used.join(', '));
+        const canvases = await page.evaluate(() => [...document.querySelectorAll('canvas')].map((c) => c.className));
+        check(`${tag}: mobile has only the 2d sky canvas, no webgl`, canvases.join() === 'sky is-on', canvases.join(','));
         const visible = await page.evaluate(() => ({
           linktree: getComputedStyle(document.querySelector('.linktree')).display !== 'none',
           sections: [...document.querySelectorAll('.section, .topbar, .site-footer')].every((el) => getComputedStyle(el).display === 'none'),
-          buttons: [...document.querySelectorAll('.linktree a')].map((a) => Math.round(a.getBoundingClientRect().height)),
+          buttons: [...document.querySelectorAll('.linktree a:not(.np-play)')].map((a) => Math.round(a.getBoundingClientRect().height)),
         }));
         check(`${tag}: only the linktree view shows`, visible.linktree && visible.sections);
         check(`${tag}: link buttons at least 52px tall`, visible.buttons.every((x) => x >= 52), visible.buttons.join(','));
@@ -479,7 +504,10 @@ async function robustChecks(gpu) {
       await page.click('.mode-toggle');
       await sleep(900);
       for (let i = 0; i < 4; i++) await page.mouse.wheel(0, 800);
-      await page.click('.browse');
+      // with nothing to browse the control is off; it must say so rather than open an empty card
+      const enabled = await page.locator('.browse').isEnabled();
+      if (enabled !== n > 0) logs.push(`browse enabled ${enabled} with ${n} commits`);
+      if (enabled) await page.click('.browse');
       await sleep(1400);
       await page.keyboard.press('ArrowLeft');
       await sleep(400);
@@ -500,13 +528,13 @@ async function robustChecks(gpu) {
   await sleep(700);
   await r.page.setViewportSize({ width: 600, height: 900 });
   await sleep(500);
-  v = await r.page.evaluate(() => ({ canvas: document.querySelectorAll('canvas').length, stars: document.documentElement.classList.contains('is-stars'), inert: document.querySelector('main').inert }));
-  check('narrowing disposes the scene and leaves stars mode', v.canvas === 0 && !v.stars && !v.inert);
+  v = await r.page.evaluate(() => ({ canvas: [...document.querySelectorAll('canvas')].map((c) => c.className).join(), stars: document.documentElement.classList.contains('is-stars'), inert: document.querySelector('main').inert }));
+  check('narrowing disposes the scene and leaves stars mode; only the narrow 2d sky remains', v.canvas === 'sky is-on' && !v.stars && !v.inert, JSON.stringify(v));
   await r.page.setViewportSize({ width: 1300, height: 900 });
   await r.page.waitForSelector('canvas.starfield', { timeout: 8000 }).catch(() => {});
   await sleep(800);
-  v = await r.page.evaluate(() => ({ canvas: document.querySelectorAll('canvas').length, legend: document.querySelectorAll('.legend button').length }));
-  check('widening rebuilds the scene once', v.canvas === 1 && v.legend > 1 && !r.logs.length, `${JSON.stringify(v)} ${r.logs.join(' | ')}`);
+  v = await r.page.evaluate(() => ({ canvas: [...document.querySelectorAll('canvas')].map((c) => c.className).join(), legend: document.querySelectorAll('.legend button').length }));
+  check('widening rebuilds the scene once and removes the narrow sky', v.canvas === 'starfield' && v.legend > 1 && !r.logs.length, `${JSON.stringify(v)} ${r.logs.join(' | ')}`);
   await r.context.close();
 
   // save data
@@ -557,7 +585,7 @@ async function perfChecks(gpu) {
   check('gpu frame time stays at the display rate with the nebula on', b.content.avg < 20 && b.stars.avg < 20, `content ${fmt(b.content)}, stars ${fmt(b.stars)}, dpr ${b.dpr}`);
 
   // vsync hides gpu cost on a fast machine, so compare the textures on software gl where every pixel costs time
-  const softCompare = await chromium.launch();
+  const softCompare = await launch();
   const compare = {};
   for (const tex of ['none', 'nebula']) {
     const r = await open(softCompare, `${ORIGIN}/?debug&texture=${tex}`, { width: 1440, height: 900, dsf: 1 });
@@ -572,16 +600,28 @@ async function perfChecks(gpu) {
   check('the nebula adds little frame time even on software gl', extra < Math.max(3, compare.none.avg * 0.2), `none ${fmt(compare.none)}, nebula ${fmt(compare.nebula)}, +${extra.toFixed(1)}ms`);
 
   // software gl at 2x with a throttled cpu, the case adaptive resolution exists for
-  const soft = await chromium.launch();
-  const s = await open(soft, `${ORIGIN}/?debug`, { width: 1440, height: 900, dsf: 2 });
+  const soft = await launch();
+  // every value the pixel ratio takes from the moment the canvas exists, so an early step down is
+  // never mistaken for a start below 2
+  const logDpr = () => {
+    window.__dprLog = [];
+    const note = (el) => {
+      const v = Number(el?.dataset?.dpr);
+      if (v && window.__dprLog.at(-1) !== v) window.__dprLog.push(v);
+    };
+    new MutationObserver((list) => {
+      for (const m of list) {
+        if (m.type === 'attributes') note(m.target);
+        else for (const n of m.addedNodes) note(n.matches?.('canvas.starfield') ? n : n.querySelector?.('canvas.starfield'));
+      }
+    }).observe(document, { subtree: true, childList: true, attributes: true, attributeFilter: ['data-dpr'] });
+  };
+  const s = await open(soft, `${ORIGIN}/?debug`, { width: 1440, height: 900, dsf: 2, init: logDpr });
   await sceneReady(s.page);
   const cdp = await s.context.newCDPSession(s.page);
   await cdp.send('Emulation.setCPUThrottlingRate', { rate: 6 });
-  const seen = [];
-  for (let i = 0; i < 40; i++) {
-    seen.push(await s.page.evaluate(() => Number(document.querySelector('canvas.starfield').dataset.dpr)));
-    await sleep(500);
-  }
+  await sleep(20000);
+  const seen = await s.page.evaluate(() => window.__dprLog);
   const monotonic = seen.every((d, i) => i === 0 || d <= seen[i - 1]);
   check('adaptive resolution steps down on a slow device and never back up', seen[0] === 2 && seen.at(-1) < 2 && monotonic, `dpr over 20s: ${[...new Set(seen)].join(' -> ')}`);
   await cdp.send('Emulation.setCPUThrottlingRate', { rate: 1 });
@@ -669,7 +709,7 @@ async function contrastChecks(gpu) {
 
 // rendered star pixels and the hover ring must land where the picker projects them, with real scrollbars
 async function alignChecks() {
-  const browser = await chromium.launch({ ...gpuLaunch, ignoreDefaultArgs: ['--hide-scrollbars'] });
+  const browser = await launch({ ...gpuLaunch, ignoreDefaultArgs: ['--hide-scrollbars'] });
   try {
     for (const [w, h, forced] of [[1440, 900, false], [2560, 1440, false], [1440, 900, true], [2560, 1440, true]]) {
       for (const dsf of [1, 1.25, 1.5, 2]) {
@@ -694,8 +734,16 @@ async function alignChecks() {
           const vw = document.documentElement.clientWidth;
           const picks = all.filter((p) => {
             if (Math.abs(p.dist - st.focal) > 2.6 || p.x < 60 || p.x > vw - 60 || p.y < 110 || p.y > innerHeight - 140) return false;
-            // only other bright stars can pull the centroid, the far haze sits under the threshold
-            return all.every((q) => q.i === p.i || q.dist < 0.8 || Math.abs(q.dist - st.focal) > 4 || Math.hypot(q.x - p.x, q.y - p.y) > 36);
+            // bright stars near the focal plane pull the centroid from anywhere close. so does any star that still
+            // reads as a star (blur under the pick limit) at any depth when its disc nearly touches this one: behind
+            // the focal plane the blur is halved, so far stars stay sharp
+            return all.every(
+              (q) =>
+                q.i === p.i ||
+                q.dist < 0.8 ||
+                ((Math.abs(q.dist - st.focal) > 4 || Math.hypot(q.x - p.x, q.y - p.y) > 36) &&
+                  (q.coc >= 26 || Math.hypot(q.x - p.x, q.y - p.y) > (p.size + q.size) / 2 + 6))
+            );
           });
           picks.sort((a, b) => b.x - a.x);
           return picks.slice(0, 3);
@@ -887,12 +935,14 @@ async function overscrollChecks(gpu) {
 
       // a fresh gesture after a rest, released below the threshold, eases back
       await sleep(600);
-      await page.mouse.wheel(0, -120);
+      // one standard mouse notch, 100 px, which stays under the commit distance
+      await page.mouse.wheel(0, -100);
       await sleep(120);
       s = await state(page);
       const pulled = s.band;
       const focalPulled = s.focal;
-      await sleep(900);
+      // progress resets after the idle time, then the band eases out; wait for that state, not a fixed time
+      await page.waitForFunction(() => window.__starfield.state().band < 0.02, null, { timeout: 4000 }).catch(() => {});
       s = await state(page);
       check('a short pull shows the rubber band, then eases back without exiting', pulled > 0.1 && pulled <= 1 && focalPulled > 8 && s.band < 0.02 && (await stars()), `band ${pulled.toFixed(2)}, focal ${focalPulled.toFixed(2)}`);
       check('the rubber band never goes past a quarter of the way', focalPulled <= 8 + 0.25 * 7 + 0.01);
@@ -961,14 +1011,440 @@ async function overscrollChecks(gpu) {
   await drag(600, 150, 750, 20);
   await sleep(900);
   const stillStars = await page.evaluate(() => document.documentElement.classList.contains('is-stars'));
-  // a fresh drag only counts once the camera has come to rest at the edge
-  await page.waitForFunction(() => window.__starfield.state().exit.edgeSince > 0, null, { timeout: 6000 }).catch(() => {});
-  await sleep(450);
+  // a new touch that starts at the newest end counts
+  await page.waitForFunction(() => Math.abs(window.__starfield.state().cam.z) < 0.02, null, { timeout: 6000 }).catch(() => {});
   await drag(600, 200, 650, 15);
   await sleep(900);
   const exited = await page.evaluate(() => !document.documentElement.classList.contains('is-stars'));
   check('touch: dragging travels, arriving at the edge stays, a fresh drag past it returns to the page', traveled && stillStars && exited, `traveled ${traveled}, stayed ${stillStars}, exited ${exited}`);
   await ctx.close();
+
+  // wheel timing, scheduled inside the page so the spacing between events is exact
+  {
+    const { page: p, context: c, logs: l } = await open(gpu, `${ORIGIN}/?debug`, { width: 1440, height: 900 });
+    await sceneReady(p);
+    // plays wheel events at exact offsets; reports when the page exited, measured from event `mark`
+    const play = (events, mark = 0, settle = 1500) =>
+      p.evaluate(
+        ({ events, mark, settle }) =>
+          new Promise((resolve) => {
+            const t0 = performance.now();
+            let exitAt = null;
+            let band = 0;
+            const watch = () => {
+              const s = window.__starfield.state();
+              band = Math.max(band, s.band);
+              if (exitAt === null && s.mode !== 'stars') exitAt = performance.now() - t0 - events[mark].at;
+              if (performance.now() - t0 < events.at(-1).at + settle) requestAnimationFrame(watch);
+              else resolve({ exitAt, band, end: window.__starfield.state().band });
+            };
+            requestAnimationFrame(watch);
+            for (const e of events) setTimeout(() => window.dispatchEvent(new WheelEvent('wheel', { deltaY: e.dy, bubbles: true })), e.at);
+          }),
+        { events, mark, settle }
+      );
+    const enterAndTravel = async () => {
+      if ((await state(p)).mode !== 'stars') {
+        await p.evaluate(() => window.scrollTo(0, 0));
+        await sleep(300);
+        await p.click('.mode-toggle');
+        await sleep(1000);
+      }
+      await play(Array.from({ length: 8 }, (_, k) => ({ at: k * 30, dy: 150 })), 0, 1200);
+    };
+    const flick = () => Array.from({ length: 118 }, (_, k) => ({ at: k * 16, dy: -60 * 0.96 ** k }));
+    await p.mouse.move(720, 450);
+
+    await enterAndTravel();
+    const a = await play(flick(), 0, 2000);
+    await enterAndTravel();
+    const spin = [];
+    for (let t = 0, g = 12; t < 4000; t += g, g *= 1.3) spin.push({ at: t, dy: -100 });
+    const a3 = await play(spin, 0, 2000);
+    check('inertia guard: a decaying flick and a slowing wheel spin that reach the edge never exit', a.exitAt === null && a3.exitAt === null, `flick ${a.exitAt}, spin ${a3.exitAt}`);
+
+    const swipeAfter = (f, gap) => [-4, -8, -14, -20, -24, -24, -20, -16, -12, -8, -5, -3].map((dy, k) => ({ at: f.at(-1).at + gap + k * 16, dy }));
+    const times = [];
+    for (const gap of [50, 80, 150]) {
+      await enterAndTravel();
+      const f = flick();
+      const b = await play([...f, ...swipeAfter(f, gap)], f.length, 1500);
+      times.push(b.exitAt === null ? `${gap}: none` : `${gap}: ${Math.round(b.exitAt)} ms`);
+    }
+    check('a new swipe 50, 80 or 150 ms after an inertial flick returns to the page within 150 ms', times.every((t) => /: \d+ ms$/.test(t) && Number(t.split(': ')[1].split(' ')[0]) <= 150), times.join(', '));
+    // a re-swipe during the tail, no gap at all: the rate rebounds
+    await enterAndTravel();
+    const tail = Array.from({ length: 62 }, (_, k) => ({ at: k * 16, dy: -60 * 0.96 ** k }));
+    const reswipe = [-6, -12, -20, -28, -30, -24, -18, -12].map((dy, k) => ({ at: tail.at(-1).at + 16 + k * 16, dy }));
+    const c2 = await play([...tail, ...reswipe], tail.length, 1500);
+    check('a re-swipe during the inertial tail returns to the page', c2.exitAt !== null && c2.exitAt <= 150, `exit ${c2.exitAt === null ? 'none' : `${Math.round(c2.exitAt)} ms`}`);
+
+    await enterAndTravel();
+    await p.keyboard.press('Home');
+    await sleep(400);
+    const n = await play(Array.from({ length: 4 }, (_, k) => ({ at: k * 80, dy: -100 })), 0, 1500);
+    check('mouse notches at the edge return to the page on the second notch', n.exitAt !== null && n.exitAt >= 80 && n.exitAt < 160, `exit ${n.exitAt === null ? 'none' : `${Math.round(n.exitAt)} ms`}`);
+
+    await enterAndTravel();
+    await p.keyboard.press('Home');
+    await sleep(400);
+    const d = await play([{ at: 0, dy: -100 }], 0, 2500);
+    check('one accidental notch at the edge pulls the band, then eases back without exiting', d.exitAt === null && d.band > 0.3 && d.end < 0.02, `band ${d.band.toFixed(2)} -> ${d.end.toFixed(3)}`);
+    check('wheel timing checks left the console clean', !l.length, l.join(' | '));
+    await c.close();
+  }
+}
+
+// browsing follows the pinned language: the browse control, the arrow keys and prev and next, the
+// counters, a pin change under an open card, hover previews, the "other" bucket and an empty filter.
+// reduced motion makes every flight instant, so each step can wait on state instead of time
+async function browseChecks(gpu) {
+  const { page, context, logs } = await open(gpu, `${ORIGIN}/?debug`, { width: 1440, height: 900, reduced: true });
+  await sceneReady(page);
+  await page.click('.mode-toggle');
+  await sleep(600);
+  const langs = await page.evaluate(() => Array.from(window.__starfield.layout.langs));
+  const n = langs.length;
+  const listOf = (lang) => langs.map((l, i) => (l === lang ? i : -1)).filter((i) => i >= 0);
+  // read after two frames, so the card has followed its star to wherever the last step left it
+  const card = () =>
+    page.evaluate(async () => {
+      await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
+      const s = window.__starfield.state();
+      const q = (sel) => document.querySelector(sel);
+      const count = q('.card [data-f="count"]');
+      const r = q('.card').getBoundingClientRect();
+      return {
+        focus: s.focus,
+        count: count.hidden ? null : count.textContent,
+        pos: q('.card [data-f="pos"]').textContent,
+        prev: q('.card-step[data-step="-1"]').disabled,
+        next: q('.card-step[data-step="1"]').disabled,
+        rect: [r.x, r.y, r.width, r.height].map(Math.round).join(','),
+        filter: s.filter,
+        browseFilter: s.browseFilter,
+        browseDisabled: s.browseDisabled,
+      };
+    });
+  const at = (focus) =>
+    page.waitForFunction((f) => window.__starfield.state().focus === f && !window.__starfield.state().flying, focus, { timeout: 4000 }).then(() => true).catch(() => false);
+  const pinLegend = async (lang) => {
+    await page.click(lang === null ? '.legend-all' : `.legend-dot[data-lang="${lang}"]`);
+    await page.mouse.move(720, 870);
+    await sleep(150);
+  };
+  const press = async (key, expect) => {
+    await page.keyboard.press(key);
+    await at(expect);
+    return card();
+  };
+
+  // nothing pinned: unchanged, every commit
+  await page.click('.browse');
+  await at(0);
+  let c = await card();
+  check('browse, nothing pinned: opens the newest commit, counted among all', c.focus === 0 && c.count === `${n} of ${n}`, JSON.stringify(c));
+  c = await press('ArrowLeft', 1);
+  check('arrow keys, nothing pinned: step through every commit', c.focus === 1 && c.count === `${n - 1} of ${n}`, JSON.stringify(c));
+  await page.keyboard.press('Escape');
+  await sleep(300);
+
+  // a pinned language with a few commits, through every stepping path
+  for (const [lang, name] of [[5, 'python'], [7, 'other']]) {
+    const list = listOf(lang);
+    const t = list.length;
+    await pinLegend(lang);
+    await page.click('.browse');
+    await at(list[0]);
+    c = await card();
+    check(`browse, ${name} pinned: opens the newest ${name} commit`, c.focus === list[0] && c.count === `${t} of ${t}` && c.browseFilter === lang, JSON.stringify(c));
+    const seen = [c.focus];
+    const counts = [c.count];
+    for (let k = 1; k < t; k++) {
+      c = await press('ArrowLeft', list[k]);
+      seen.push(c.focus);
+      counts.push(c.count);
+    }
+    const oldest = await press('ArrowLeft', list[t - 1]);
+    check(`arrow keys, ${name} pinned: only ${name} commits, in order, counted ${t} down to 1, stopping at the oldest`, seen.join() === list.join() && counts.every((v, k) => v === `${t - k} of ${t}`) && oldest.focus === list[t - 1], `${seen.join(',')} | ${counts.join(', ')}`);
+    for (let k = t - 2; k >= 0; k--) await press('ArrowRight', list[k]);
+    c = await press('ArrowRight', list[0]);
+    check(`arrow keys, ${name} pinned: back up to the newest and stopping there`, c.focus === list[0] && c.count === `${t} of ${t}`, JSON.stringify(c));
+    // prev and next walk one repo; they never leave the pinned language and turn off at its ends
+    const walked = [];
+    for (let k = 0; k < t && !(await card()).prev; k++) {
+      const before = (await card()).focus;
+      await page.click('.card-step[data-step="-1"]');
+      await page.waitForFunction((b) => window.__starfield.state().focus !== b && !window.__starfield.state().flying, before, { timeout: 4000 }).catch(() => {});
+      walked.push((await card()).focus);
+    }
+    c = await card();
+    check(`prev and next, ${name} pinned: stay inside ${name}, one repo, and disable at its oldest`, walked.every((i) => langs[i] === lang) && c.prev === true, `${walked.join(',')} prev disabled ${c.prev}`);
+    if (lang === 5) {
+      // a pin change under the open card: it stays put, the count follows the new set, steps go to the nearest one
+      const before = await card();
+      await pinLegend(0);
+      const after = await card();
+      check('a pin change keeps the open card where it is and in place', after.focus === before.focus && after.rect === before.rect && (await page.locator('.card').isVisible()), `${before.rect} -> ${after.rect}`);
+      check('outside the new pin, the open card hides its n of total and turns prev and next off', after.count === null && after.pos === before.pos && after.prev && after.next && after.browseFilter === 0, JSON.stringify(after));
+      await page.hover('.legend-dot[data-lang="5"]');
+      await sleep(200);
+      const hovered = await card();
+      check('a legend hover only previews: browsing still follows the pin', hovered.filter === 5 && hovered.browseFilter === 0, JSON.stringify(hovered));
+      await page.mouse.move(720, 870);
+      const older = langs.findIndex((l, i) => i > after.focus && l === 0);
+      c = await press('ArrowLeft', older);
+      const js = listOf(0);
+      check('the next step goes to the nearest commit of the new pin in that direction', c.focus === older && c.count === `${js.length - js.indexOf(older)} of ${js.length}`, JSON.stringify(c));
+    }
+    await page.keyboard.press('Escape');
+    await sleep(300);
+    await pinLegend(null);
+  }
+
+  // a filter with nothing in it
+  await page.evaluate(() => window.__starfield.pin(99));
+  await sleep(200);
+  let s = await state(page);
+  await page.evaluate(() => document.querySelector('.browse').click());
+  await sleep(400);
+  const after = await state(page);
+  check('a pin with no commits disables browsing cleanly, no card opens', s.browseDisabled === true && after.focus === -1 && (await page.locator('.card').isHidden()), JSON.stringify({ disabled: s.browseDisabled, focus: after.focus }));
+  await page.evaluate(() => window.__starfield.pin(null));
+  await sleep(200);
+  s = await state(page);
+  check('clearing it turns browsing back on', s.browseDisabled === false);
+  check('browse checks left the console clean', !logs.length, logs.join(' | '));
+  await context.close();
+}
+
+// the narrow view: the 2d sky, names and order, glass cards and tap targets, the spotify card in every state,
+// requests only after load and only to the allowed hosts, polling, reduced motion
+async function narrowChecks(gpu) {
+  const ENDPOINT = `${ORIGIN}/fake-now-playing`;
+  const ART = 'https://i.scdn.co/image/fake-art';
+  const PROFILE = 'https://open.spotify.com/user/santihs-mx';
+  const song = (over = {}, state = 'playing') => ({ state, track: { name: 'Real Song', artists: ['Real Artist'], album: 'X', image: ART, url: 'https://open.spotify.com/track/1', durationMs: 1, ...over } });
+  async function openNarrow({ width = 390, height = 844, reply = song(), delay = 0, reduced = false, query = '', clock = false } = {}) {
+    const context = await gpu.newContext({ viewport: { width, height }, deviceScaleFactor: 3, isMobile: true, hasTouch: true, reducedMotion: reduced ? 'reduce' : 'no-preference' });
+    await context.route('**/js/config.js', (r) => r.fulfill({ contentType: 'text/javascript', body: `export const NOW_PLAYING_URL = '${ENDPOINT}';` }));
+    const calls = [];
+    await context.route('**/fake-now-playing', async (r) => {
+      calls.push(Date.now());
+      if (delay) await sleep(delay);
+      if (reply === 'abort') return r.abort('connectionrefused').catch(() => {});
+      if (reply?.status) return r.fulfill({ status: reply.status, body: 'oops' }).catch(() => {});
+      return r.fulfill({ contentType: 'application/json', body: JSON.stringify(reply) }).catch(() => {});
+    });
+    await context.route('https://i.scdn.co/**', (r) => r.fulfill({ contentType: 'image/svg+xml', body: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64"><rect width="64" height="64" fill="#3f7f86"/></svg>' }));
+    await context.addInitScript(() => {
+      window.__cls = 0;
+      new PerformanceObserver((l) => {
+        for (const e of l.getEntries()) if (!e.hadRecentInput) window.__cls += e.value;
+      }).observe({ type: 'layout-shift', buffered: true });
+    });
+    const page = await context.newPage();
+    if (clock) await page.clock.install();
+    const logs = [];
+    const requests = [];
+    // a failing endpoint is allowed the browser's own network line, nothing else
+    page.on('console', (m) => (m.type() === 'error' || m.type() === 'warning') && !/Failed to load resource/.test(m.text()) && logs.push(m.text()));
+    page.on('pageerror', (e) => logs.push(e.message));
+    page.on('request', (r) => requests.push({ url: r.url(), t: Date.now() }));
+    let loadAt = 0;
+    page.on('load', () => (loadAt = Date.now()));
+    await page.goto(`${ORIGIN}/${query}`, { waitUntil: 'load' });
+    return { context, page, logs, requests, calls, loadAt: () => loadAt };
+  }
+  const cardState = (page) =>
+    page.evaluate(() => {
+      const q = (s) => document.querySelector(s);
+      const c = q('.np-card');
+      const r = q('.np-main').getBoundingClientRect();
+      const t = q('.np-title');
+      return {
+        cls: c.className,
+        plain: !q('.np-plain').hidden,
+        now: !q('.np-now').hidden,
+        play: !q('.np-play').hidden,
+        eyebrow: q('.np-state').textContent,
+        eq: getComputedStyle(q('.np-eq')).display,
+        eqAnim: getComputedStyle(q('.np-eq i')).animationName,
+        title: t.textContent,
+        titleClipped: t.scrollWidth > t.clientWidth,
+        titleLines: Math.round(t.getBoundingClientRect().height / parseFloat(getComputedStyle(t).lineHeight)),
+        artistsClipped: q('.np-artists').scrollWidth > q('.np-artists').clientWidth,
+        main: q('.np-main').href,
+        playHref: q('.np-play').href,
+        height: Math.round(r.height),
+        art: { w: q('.np-art').getBoundingClientRect().width, h: q('.np-art').getBoundingClientRect().height, radius: getComputedStyle(q('.np-art')).borderRadius, fit: getComputedStyle(q('.np-art')).objectFit },
+      };
+    });
+  const allowed = (u) => u.startsWith(ORIGIN) || u.startsWith('data:') || u.startsWith('https://i.scdn.co/');
+  const heavy = /three|gsap|ScrollTrigger|commits\.json|prs\.json|scene\/|satellite/;
+
+  // three sizes: the data arrives late, so nothing may move when it does
+  for (const [w, h] of [[390, 844], [360, 740], [430, 932]]) {
+    const tag = `narrow ${w}x${h}`;
+    const { context, page, logs, requests, loadAt } = await openNarrow({ width: w, height: h, delay: 700 });
+    await sleep(250);
+    // layout boxes, not painted ones: the staggered entrance moves the rows with transforms for a moment
+    const rects = () => page.evaluate(() => [...document.querySelectorAll('.linktree li')].map((li) => { const r = li.getBoundingClientRect(); return [li.offsetLeft, li.offsetTop, li.offsetWidth, Math.round(r.height)].join(','); }).join(' '));
+    const before = await rects();
+    await page.waitForSelector('.np-card.is-playing', { timeout: 5000 }).catch(() => {});
+    await sleep(900);
+    const after = await rects();
+    const v = await page.evaluate(() => {
+      const c = document.querySelector('canvas.sky');
+      let lit = 0;
+      if (c?.width) {
+        const o = new OffscreenCanvas(c.width, c.height);
+        const g = o.getContext('2d', { willReadFrequently: true });
+        g.drawImage(c, 0, 0);
+        const d = g.getImageData(0, 0, c.width, c.height).data;
+        for (let i = 3; i < d.length; i += 4) if (d[i] > 8) lit++;
+      }
+      const links = [...document.querySelectorAll('.linktree li > a')];
+      return {
+        lit,
+        name: document.querySelector('.hero-name').textContent,
+        kicker: document.querySelector('.hero-kicker').textContent,
+        order: [...links.map((a) => a.textContent.trim()), document.querySelector('.np-main') ? 'spotify card' : ''].join(', '),
+        hrefs: links.map((a) => a.getAttribute('href')).join(' '),
+        targets: [...document.querySelectorAll('.linktree a')].filter((a) => !a.hidden).map((a) => { const r = a.getBoundingClientRect(); return Math.round(Math.min(r.width, r.height)); }),
+        overflow: document.documentElement.scrollWidth - innerWidth,
+        cls: window.__cls,
+      };
+    });
+    check(`${tag}: the sky draws behind the links`, v.lit > 200, `${v.lit} lit pixels`);
+    check(`${tag}: name and kicker read as on desktop`, v.name === 'Santi Hernández' && v.kicker === 'cs undergraduate / tecnológico de monterrey', `${v.name} / ${v.kicker}`);
+    check(`${tag}: links in order, with the spotify card last`, v.order === 'linkedin, email, github, cv, spotify card' && v.hrefs === 'https://www.linkedin.com/in/santihdzs mailto:cv@santihdzs.com https://github.com/santihdzs ./cv.pdf', `${v.order} | ${v.hrefs}`);
+    check(`${tag}: every tap target at least 44px`, v.targets.every((t) => t >= 44), v.targets.join(','));
+    check(`${tag}: no horizontal scroll, and nothing moves when the track arrives`, v.overflow <= 0 && before === after && v.cls === 0, `cls ${v.cls}${before === after ? '' : ` | ${before} -> ${after}`}`);
+    const late = requests.filter((r) => !r.url.startsWith(ORIGIN) || r.url.includes('fake-now')).filter((r) => r.t < loadAt());
+    check(`${tag}: only allowed hosts, nothing heavy, and the worker and artwork only after load`, requests.every((r) => allowed(r.url)) && !requests.some((r) => heavy.test(r.url)) && !late.length, requests.filter((r) => !allowed(r.url) || heavy.test(r.url)).map((r) => r.url).join(' ') + late.map((r) => ` early: ${r.url}`).join(''));
+    check(`${tag}: console clean`, !logs.length, logs.join(' | '));
+    await page.screenshot({ path: `${OUT}/narrow-${w}x${h}.png` });
+    if (w === 390) {
+      // text over the glass, measured against the brightest background the sky puts behind each card
+      const ratio = await page.evaluate(async () => {
+        const lum = (c) => { const f = (v) => { v /= 255; return v <= 0.04045 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4; }; return 0.2126 * f(c[0]) + 0.7152 * f(c[1]) + 0.0722 * f(c[2]); };
+        const fg = (el) => lum(getComputedStyle(el).color.match(/\d+/g).slice(0, 3).map(Number));
+        return [...document.querySelectorAll('.linktree li > a, .np-state, .np-title, .np-artists')].map((el) => ({ sel: el.className || el.textContent.trim(), fg: fg(el) }));
+      });
+      await page.addStyleTag({ content: '.linktree *, .linktree a { color: transparent !important; } .linktree img, .linktree svg, .np-eq { visibility: hidden !important; }' });
+      await sleep(100);
+      const shot = await page.screenshot({ clip: await page.evaluate(() => { const r = document.querySelector('.linktree').getBoundingClientRect(); return { x: r.x, y: r.y, width: r.width, height: r.height }; }) });
+      const probe = await gpu.newPage();
+      const bg = await probe.evaluate(async (src) => {
+        const img = new Image();
+        img.src = src;
+        await img.decode();
+        const c = document.createElement('canvas');
+        c.width = img.width;
+        c.height = img.height;
+        const g = c.getContext('2d');
+        g.drawImage(img, 0, 0);
+        const d = g.getImageData(0, 0, c.width, c.height).data;
+        const ls = [];
+        const f = (v) => { v /= 255; return v <= 0.04045 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4; };
+        for (let i = 0; i < d.length; i += 4) ls.push(0.2126 * f(d[i]) + 0.7152 * f(d[i + 1]) + 0.0722 * f(d[i + 2]));
+        ls.sort((a, b) => a - b);
+        return ls[Math.floor(ls.length * 0.99)];
+      }, `data:image/png;base64,${shot.toString('base64')}`);
+      await probe.close();
+      const worst = Math.min(...ratio.map((r) => (Math.max(r.fg, bg) + 0.05) / (Math.min(r.fg, bg) + 0.05)));
+      check(`${tag}: card text keeps AA over the glass and the sky`, worst >= 4.5, `worst ${worst.toFixed(2)}:1 against the 99th percentile background`);
+    }
+    await context.close();
+  }
+
+  // the spotify card in every state
+  const states = [
+    ['?spotify=mock', { query: '?spotify=mock' }, (s) => s.cls.includes('is-playing') && s.eyebrow === 'now playing' && s.eq !== 'none' && s.eqAnim === 'eq' && s.play],
+    ['?spotify=mock-recent', { query: '?spotify=mock-recent' }, (s) => s.cls.includes('is-recent') && s.eyebrow === 'last played' && s.eq === 'none' && s.play],
+    ['playing', { reply: song() }, (s) => s.cls.includes('is-playing') && s.playHref === 'https://open.spotify.com/track/1'],
+    ['recent without playedAt', { reply: song({}, 'recent') }, (s) => s.cls.includes('is-recent') && s.eyebrow === 'last played'],
+    ['idle', { reply: { state: 'idle' } }, (s) => s.plain && !s.now && !s.play],
+    ['failing endpoint (500)', { reply: { status: 500 } }, (s) => s.plain && !s.now && !s.play],
+    ['unreachable endpoint', { reply: 'abort' }, (s) => s.plain && !s.now && !s.play],
+    ['a very long title', { reply: song({ name: 'An Extraordinarily Long Track Title That Keeps Going Far Past Any Sensible Width (Extended Remastered Version)' }) }, (s) => s.titleClipped && s.titleLines === 1],
+    ['a very long artist list', { reply: song({ artists: Array.from({ length: 12 }, (_, k) => `Featured Artist Number ${k + 1}`) }) }, (s) => s.artistsClipped],
+  ];
+  for (const [name, opts, ok] of states) {
+    const { context, page, logs } = await openNarrow(opts);
+    await sleep(900);
+    const s = await cardState(page);
+    const fixed = s.height === 86 && s.main === PROFILE && (s.plain || (s.art.w === 44 && s.art.h === 44 && s.art.radius === '4px' && s.art.fit === 'contain'));
+    check(`spotify card, ${name}: renders as expected, links to the profile, same height`, ok(s) && fixed && !logs.length, `${JSON.stringify(s)} ${logs.join(' | ')}`);
+    if (name === 'playing' || name === 'idle') await page.screenshot({ path: `${OUT}/narrow-spotify-${name}.png` });
+    await context.close();
+  }
+
+  // polling: once after load, again on becoming visible, every 30 s while visible, never two at once
+  {
+    const { context, page, calls } = await openNarrow({ clock: true, delay: 300 });
+    await page.clock.runFor(1000);
+    await sleep(500);
+    const first = calls.length;
+    await page.evaluate(() => {
+      Object.defineProperty(document, 'hidden', { configurable: true, get: () => true });
+      document.dispatchEvent(new Event('visibilitychange'));
+    });
+    await page.clock.runFor(60000);
+    await sleep(300);
+    const hidden = calls.length;
+    await page.evaluate(() => {
+      Object.defineProperty(document, 'hidden', { configurable: true, get: () => false });
+      document.dispatchEvent(new Event('visibilitychange'));
+      document.dispatchEvent(new Event('visibilitychange'));
+    });
+    await sleep(100);
+    const visible = calls.length;
+    await sleep(500);
+    await page.clock.runFor(30500);
+    await sleep(600);
+    const cadence = calls.length;
+    check('spotify card polls once after load, not while hidden, once on return (one in flight), then every 30 s', first === 1 && hidden === 1 && visible === 2 && cadence === 3, `${first}, ${hidden}, ${visible}, ${cadence}`);
+    await context.close();
+  }
+
+  // reduced motion: static bars, no press scale or nudge, a still sky; hover only where hovering exists
+  for (const reduced of [false, true]) {
+    const { context, page, logs } = await openNarrow({ reduced });
+    await sleep(900);
+    const card = await page.locator('.linktree li > a').first().boundingBox();
+    // the press must not follow the link
+    await page.evaluate(() => document.querySelector('.linktree li > a').addEventListener('click', (e) => e.preventDefault()));
+    await page.mouse.move(card.x + card.width / 2, card.y + card.height / 2);
+    await page.mouse.down();
+    await sleep(300);
+    const pressed = await page.evaluate(() => {
+      const a = document.querySelector('.linktree li > a');
+      return { card: getComputedStyle(a).transform, arrow: getComputedStyle(a.querySelector('.i')).transform, border: getComputedStyle(a).borderColor, accent: getComputedStyle(document.documentElement).getPropertyValue('--accent').trim() };
+    });
+    await page.mouse.up();
+    const eq = await page.evaluate(() => getComputedStyle(document.querySelector('.np-eq i')).animationName);
+    const sky = async () => page.evaluate(() => document.querySelector('canvas.sky')?.toDataURL().slice(-120));
+    const a = await sky();
+    await sleep(700);
+    const b = await sky();
+    const hoverRules = await page.evaluate(() => {
+      const out = [];
+      const walk = (rules, media) => { for (const r of rules) { if (r.cssRules && r.conditionText !== undefined) walk(r.cssRules, r.conditionText); else if (r.selectorText?.includes('.linktree') && r.selectorText.includes(':hover')) out.push(media || 'none'); } };
+      for (const sheet of document.styleSheets) walk(sheet.cssRules, '');
+      return out;
+    });
+    const accentBorder = pressed.border.replace(/\s/g, '') === 'rgb(74,222,128)';
+    if (!reduced) {
+      check('narrow press state: the card eases to 0.99, the border and arrow take the accent, the arrow nudges', pressed.card.startsWith('matrix(0.99') && pressed.arrow !== 'none' && accentBorder && eq === 'eq' && a !== b, JSON.stringify(pressed));
+      check('narrow hover styles only inside @media (hover: hover)', hoverRules.length > 0 && hoverRules.every((m) => m.includes('hover: hover')), hoverRules.join(', '));
+    } else {
+      check('narrow, reduced motion: static bars, no press scale or nudge, a still sky', pressed.card === 'none' && pressed.arrow === 'none' && accentBorder && eq === 'none' && a === b, JSON.stringify({ ...pressed, eq }));
+    }
+    check(`narrow${reduced ? ', reduced motion' : ''}: console clean`, !logs.length, logs.join(' | '));
+    await context.close();
+  }
 }
 
 // with a card open, clicking another star travels there; closing still returns home
@@ -1116,6 +1592,12 @@ async function cardLayoutChecks(gpu) {
 
 // launch frames: trail and flame never draw inside the rocket outline
 async function rocketChecks(gpu) {
+  // where the footer puts the rocket, then its top pinned to a quarter and a half css pixel
+  for (const frac of [null, 0.25, 0.5]) await rocketLaunchFrames(gpu, frac);
+}
+
+async function rocketLaunchFrames(gpu, frac) {
+  const tag = frac === null ? '' : ` (rocket top at +${frac} px)`;
   const { page, context, logs } = await open(gpu, `${ORIGIN}/?debug`, { width: 1440, height: 900, dsf: 2 });
   await sceneReady(page);
   // plain background so any exhaust pixel inside the outline would stand out
@@ -1124,6 +1606,15 @@ async function rocketChecks(gpu) {
   await sleep(900);
   // ROCKET_OLD_BUG=1 puts back the original defect (fill-box flame, no mask) to prove this check catches it
   if (process.env.ROCKET_OLD_BUG) await page.addStyleTag({ content: '.rocket-flame { transform-box: fill-box !important; transform-origin: 50% 0; } .rocket-flyer g[mask] { mask: none !important; }' });
+  if (frac !== null) {
+    const top = await page.evaluate((frac) => {
+      const svg = document.querySelector('.rocket-svg');
+      const shift = (((frac - svg.getBoundingClientRect().top) % 1) + 1) % 1;
+      svg.style.translate = `0 ${shift}px`;
+      return svg.getBoundingClientRect().top;
+    }, frac);
+    check(`rocket pinned to a fractional position${tag}`, Math.abs((((top % 1) + 1) % 1) - frac) < 0.01, top.toFixed(3));
+  }
   await page.click('.rocket');
   // gsap returns the timeline from pause and seek; never hand that object back to playwright
   await page.evaluate(() => {
@@ -1132,7 +1623,7 @@ async function rocketChecks(gpu) {
   // the outline is see-through: hide the page behind it too, only the flat background may show
   await page.addStyleTag({ content: 'main, .site-footer, .topbar, .stars-ui { visibility: hidden !important; }' });
   const has = await page.evaluate(() => !!window.__launch);
-  check('launch timeline exposed for frame capture', has);
+  check(`launch timeline exposed for frame capture${tag}`, has);
   // differential test: each frame is captured with and without the exhaust group. a pixel that
   // changes and lies inside the rocket silhouette (fill or its outline) is exhaust drawn where it
   // must not be. the browser itself answers which pixels are inside, via isPointInFill/Stroke.
@@ -1180,7 +1671,7 @@ async function rocketChecks(gpu) {
     await sleep(30);
     const without = await page.screenshot({ clip });
     await page.evaluate(() => document.querySelector('style:last-of-type').remove());
-    await fs.writeFile(`${OUT}/rocket-frame-${String(Math.round(t * 1000)).padStart(4, '0')}.png`, withExhaust);
+    if (frac === null) await fs.writeFile(`${OUT}/rocket-frame-${String(Math.round(t * 1000)).padStart(4, '0')}.png`, withExhaust);
     const probe = await gpu.newPage();
     const res = await probe.evaluate(
       async ({ a, b, inside }) => {
@@ -1215,12 +1706,12 @@ async function rocketChecks(gpu) {
     changed += res.diff;
     if (res.leak) leakNotes.push(`t${t.toFixed(1)}:${res.leak}`);
   }
-  check('rocket launch frames: no trail or flame pixel inside the outline', leaks === 0 && frames >= 8 && changed > 0, `${frames} frames, ${changed} exhaust pixels drawn, ${leaks} inside the silhouette ${leakNotes.join(' ')}`);
+  check(`rocket launch frames: no trail or flame pixel inside the outline${tag}`, leaks === 0 && frames >= 8 && changed > 0, `${frames} frames, ${changed} exhaust pixels drawn, ${leaks} inside the silhouette ${leakNotes.join(' ')}`);
   await page.evaluate(() => {
     window.__launch?.play();
   });
   await sleep(1500);
-  check('rocket checks left the console clean', !logs.length, logs.join(' | '));
+  check(`rocket checks left the console clean${tag}`, !logs.length, logs.join(' | '));
   await context.close();
 }
 
@@ -1332,7 +1823,7 @@ async function satelliteChecks(gpu) {
       };
     });
     check(`satellite ${q}: renders as a link to spotify with an accessible name`, v && v.href.startsWith('https://open.spotify.com/') && v.target === '_blank' && v.rel.includes('noopener') && v.label.startsWith(`${eyebrow}:`) && v.label.endsWith('opens on spotify') && v.cls.includes(cls), JSON.stringify(v));
-    check(`satellite ${q}: artwork is a 4px rounded square with the spotify icon beside it`, v && v.radius === '4px' && v.icon >= 21, JSON.stringify(v));
+    check(`satellite ${q}: artwork is a 4px rounded square with the spotify icon beside it`, v && v.radius === '4px' && Math.round(v.icon) >= 21, JSON.stringify(v));
     const pos = () => page.evaluate(() => document.querySelector('.satellite').style.transform);
     const p1 = await pos();
     await sleep(700);
@@ -1365,6 +1856,107 @@ async function satelliteChecks(gpu) {
     await sleep(1200);
     const b = await page.evaluate(() => document.querySelector('.satellite')?.style.transform);
     check('reduced motion: the satellite sits still on its orbit', !!a && a === b);
+    const rm = await page.evaluate(() => ({
+      behind: document.querySelector('.orbit').classList.contains('is-behind'),
+      pointer: getComputedStyle(document.querySelector('.satellite')).pointerEvents,
+      opacity: getComputedStyle(document.querySelector('.sat-body')).opacity,
+    }));
+    check('reduced motion: the still satellite is never dimmed and stays interactive', !rm.behind && rm.pointer === 'auto' && rm.opacity === '1', JSON.stringify(rm));
+    await context.close();
+  }
+
+  // while the tile is dimmed behind the hero text it takes no pointer input; keyboard focus still opens it.
+  // 1024 wide, where the orbit crosses the text within seconds of loading.
+  {
+    const { page, context, logs } = await open(gpu, `${ORIGIN}/?spotify=mock`, { width: 1024, height: 768 });
+    await context.route('https://open.spotify.com/**', (route) => route.fulfill({ contentType: 'text/html', body: '<title>track</title>' }));
+    await page.waitForSelector('.orbit:not([hidden])', { timeout: 8000 }).catch(() => {});
+    const TEXT = '.hero-kicker, .hero-name, .hero-lede, .hero-links';
+    // waits frame by frame for the tile to reach a state and returns a point on it, or null after about a lap
+    const when = (want) =>
+      page
+        .waitForFunction(
+          ({ want, TEXT }) => {
+            const orbit = document.querySelector('.orbit');
+            const op = Number(getComputedStyle(document.querySelector('.sat-body')).opacity);
+            const dim = orbit.classList.contains('is-behind') && op <= 0.451;
+            const bright = !orbit.classList.contains('is-behind') && op >= 0.999;
+            const r = document.querySelector('.sat-body').getBoundingClientRect();
+            const center = { x: r.left + r.width / 2, y: r.top + r.height / 2 };
+            const boxes = [...document.querySelectorAll(TEXT)].map((e) => e.getBoundingClientRect());
+            const covered = (p) => boxes.some((b) => p.x >= b.left && p.x <= b.right && p.y >= b.top && p.y <= b.bottom);
+            if (want === 'dim') return dim ? center : null;
+            if (want === 'dim-center-on-text') return dim && covered(center) ? center : null;
+            if (want === 'dim-uncovered') {
+              if (!dim) return null;
+              for (const fy of [0.3, 0.7]) for (const fx of [0.15, 0.5, 0.85]) {
+                const p = { x: r.left + r.width * fx, y: r.top + r.height * fy };
+                if (!covered(p)) return p;
+              }
+              return null;
+            }
+            return bright && !covered(center) && document.elementFromPoint(center.x, center.y)?.closest('.satellite') ? center : null;
+          },
+          { want, TEXT },
+          { polling: 'raf', timeout: 100000 }
+        )
+        .then((h) => h.jsonValue())
+        .catch(() => null);
+    const state = () =>
+      page.evaluate(() => ({
+        open: document.querySelector('.orbit').classList.contains('is-open'),
+        label: getComputedStyle(document.querySelector('.sat-label')).opacity,
+        opacity: getComputedStyle(document.querySelector('.sat-body')).opacity,
+        pos: document.querySelector('.satellite').style.transform,
+      }));
+
+    let p = await when('dim-center-on-text');
+    const atCenter = p && (await page.evaluate(({ x, y, TEXT }) => {
+      const el = document.elementFromPoint(x, y);
+      return { text: !!el?.closest(TEXT), satellite: !!el?.closest('.satellite'), pointer: getComputedStyle(document.querySelector('.satellite')).pointerEvents };
+    }, { ...p, TEXT }));
+    check('dimmed satellite: the hero text owns the point at the tile center', !!atCenter && atCenter.text && !atCenter.satellite && atCenter.pointer === 'none', JSON.stringify(atCenter));
+
+    p = await when('dim-uncovered');
+    let dimmed = null;
+    if (p) {
+      const hit = await page.evaluate(({ x, y }) => !!document.elementFromPoint(x, y)?.closest('.satellite'), p);
+      const popup = page.waitForEvent('popup', { timeout: 900 }).then(() => true).catch(() => false);
+      await page.mouse.move(p.x, p.y);
+      await page.mouse.click(p.x, p.y);
+      const opened = await popup;
+      const st = await state();
+      dimmed = { hit, opened, open: st.open, label: st.label };
+      await page.mouse.move(5, 5);
+    }
+    check('dimmed satellite: no hover, no label and no click where no words cover it', !!dimmed && !dimmed.hit && !dimmed.opened && !dimmed.open && dimmed.label === '0', JSON.stringify(dimmed));
+
+    p = await when('dim');
+    let kb = null;
+    if (p) {
+      await page.focus('.hero-links li:last-child a');
+      await page.keyboard.press('Tab');
+      await sleep(450);
+      const a1 = await state();
+      await sleep(500);
+      const a2 = await state();
+      kb = { focused: await page.evaluate(() => document.activeElement?.classList.contains('satellite')), open: a1.open, label: a1.label, opacity: a1.opacity, paused: a1.pos === a2.pos };
+      await page.evaluate(() => document.activeElement?.blur());
+    }
+    check('dimmed satellite: keyboard focus still opens it at full opacity and pauses the orbit', !!kb && kb.focused && kb.open && kb.label === '1' && kb.opacity === '1' && kb.paused, JSON.stringify(kb));
+
+    p = await when('clear');
+    let clear = null;
+    if (p) {
+      await page.mouse.move(p.x, p.y);
+      await sleep(450);
+      const st = await state();
+      const [popup] = await Promise.all([page.waitForEvent('popup', { timeout: 3000 }).catch(() => null), page.mouse.click(p.x, p.y)]);
+      clear = { open: st.open, label: st.label, popup: popup ? new URL(popup.url()).hostname : null };
+      await popup?.close();
+    }
+    check('clear of the text: hover opens the label and a click opens the track', !!clear && clear.open && clear.label === '1' && clear.popup === 'open.spotify.com', JSON.stringify(clear));
+    check('dimmed satellite checks left the console clean', !logs.length, logs.join(' | '));
     await context.close();
   }
 
@@ -1372,6 +1964,8 @@ async function satelliteChecks(gpu) {
   const ENDPOINT = `${ORIGIN}/fake-now-playing`;
   const cases = {
     'valid playing payload': { status: 200, body: JSON.stringify({ state: 'playing', track: { name: 'Real Song', artists: ['Real Artist'], album: 'X', image: `${ORIGIN}/favicon.svg`.replace('http:', 'https:'), url: 'https://open.spotify.com/track/1', durationMs: 1, progressMs: 0 } }), expect: true },
+    'recent payload without playedAt': { status: 200, body: JSON.stringify({ state: 'recent', track: { name: 'Paused Song', artists: ['Real Artist'], album: 'X', image: `${ORIGIN}/favicon.svg`.replace('http:', 'https:'), url: 'https://open.spotify.com/track/2', durationMs: 1 } }), expect: true },
+    'recent payload with a null playedAt': { status: 200, body: JSON.stringify({ state: 'recent', track: { name: 'Paused Song', artists: ['Real Artist'], album: 'X', image: `${ORIGIN}/favicon.svg`.replace('http:', 'https:'), url: 'https://open.spotify.com/track/2', durationMs: 1, playedAt: null } }), expect: true },
     'idle payload': { status: 200, body: JSON.stringify({ state: 'idle' }), expect: false },
     'http 500': { status: 500, body: 'oops', expect: false },
     'network error': { abort: true, expect: false },
@@ -1413,7 +2007,7 @@ async function satelliteChecks(gpu) {
     await ctx.close();
   }
 
-  // narrow screens never load or poll it
+  // narrow screens never load the satellite itself
   {
     const ctx = await gpu.newContext({ viewport: { width: 390, height: 844 } });
     await ctx.route('**/js/config.js', (route) => route.fulfill({ contentType: 'text/javascript', body: `export const NOW_PLAYING_URL = '${ENDPOINT}';` }));
@@ -1422,7 +2016,7 @@ async function satelliteChecks(gpu) {
     page.on('request', (r) => urls.push(r.url()));
     await page.goto(`${ORIGIN}/?spotify=mock`, { waitUntil: 'networkidle' });
     await sleep(800);
-    check('mobile: no satellite, no config, no polling', !urls.some((u) => /satellite|config\.js|fake-now/.test(u)) && !(await page.locator('.orbit').count()));
+    check('mobile: never loads the desktop satellite; the sample shows in the spotify card without polling', !urls.some((u) => /satellite|fake-now/.test(u)) && !(await page.locator('.orbit').count()) && (await page.locator('.np-card.is-playing').count()) === 1);
     await ctx.close();
   }
 }
@@ -1854,17 +2448,41 @@ async function nebulaColorChecks(gpu) {
   await page.click('.mode-toggle');
   await sleep(1000);
   const colors = () => page.evaluate(() => window.__starfield.nebulaColors().a.map((v) => +v.toFixed(4)).join(','));
+  // every frame from a click until the colors have moved and then held still for 20 frames, so no
+  // single sleep decides the result
+  const track = (from) =>
+    page.evaluate(
+      (from) =>
+        new Promise((resolve) => {
+          const read = () => window.__starfield.nebulaColors().a.map((v) => +v.toFixed(4)).join(',');
+          const seen = [];
+          let still = 0;
+          const t0 = performance.now();
+          const step = () => {
+            const c = read();
+            still = seen.length && c === seen.at(-1) ? still + 1 : 0;
+            seen.push(c);
+            const moved = seen.some((s) => s !== from);
+            if ((moved && still >= 20) || performance.now() - t0 > 4000) resolve(seen);
+            else requestAnimationFrame(step);
+          };
+          requestAnimationFrame(step);
+        }),
+      from
+    );
   const base = await colors();
   const dot = page.locator('.legend-dot:not(.legend-all)').first();
+  const pinning = track(base);
   await dot.click();
-  await sleep(110);
-  const mid = await colors();
-  await sleep(500);
-  const pinned = await colors();
+  const pinSeq = await pinning;
+  const pinned = pinSeq.at(-1);
+  const unpinning = track(pinned);
   await dot.click();
-  await sleep(500);
-  const back = await colors();
-  check('nebula color animates with the pinned accent and returns on unpin', mid !== base && mid !== pinned && pinned !== base && back === base, `${base} -> ${mid} -> ${pinned} -> ${back}`);
+  const backSeq = await unpinning;
+  const back = backSeq.at(-1);
+  const mid = pinSeq.find((c) => c !== base && c !== pinned);
+  const midBack = backSeq.find((c) => c !== base && c !== pinned);
+  check('nebula color animates with the pinned accent and returns on unpin', !!mid && !!midBack && pinned !== base && back === base, `${base} -> ${mid} -> ${pinned} -> ${midBack} -> ${back} (${pinSeq.length} and ${backSeq.length} frames)`);
   check('nebula color checks left the console clean', !logs.length, logs.join(' | '));
   await context.close();
 }
@@ -1952,6 +2570,7 @@ async function liveChecks(gpu) {
   const ENDPOINT = 'https://now-playing.santihdzs.workers.dev/now-playing';
   for (const origin of [`http://localhost:${PORT}`, `http://127.0.0.1:${PORT}`]) {
     const context = await gpu.newContext({ viewport: { width: 1440, height: 900 } });
+    await context.unroute(PROD_WORKER);
     const page = await context.newPage();
     const logs = [];
     const external = [];
@@ -2060,6 +2679,7 @@ async function liveChecks(gpu) {
   // a whole offline page after the satellite showed: the next fetch fails quietly
   {
     const context = await gpu.newContext({ viewport: { width: 1440, height: 900 } });
+    await context.unroute(PROD_WORKER);
     const page = await context.newPage();
     const errors = [];
     page.on('pageerror', (e) => errors.push(e.message));
@@ -2075,9 +2695,624 @@ async function liveChecks(gpu) {
   }
 }
 
+// a block that throws is one failed check, not the end of the run
+async function attempt(name, fn) {
+  try {
+    await fn();
+  } catch (err) {
+    check(name, false, `threw: ${String(err?.message ?? err).split('\n')[0]}`);
+  }
+}
+
+// the one narrow breakpoint, as js and css both spell it
+const NARROW_QUERY = '(max-width: 720px), (max-height: 500px) and (pointer: coarse) and (orientation: landscape)';
+
+// a pickable star other than the focused one, clear of the card, that a click on the field would reach
+const clickableStar = (page, exclude = []) =>
+  page.evaluate((ex) => {
+    const f = window.__starfield;
+    const st = f.state();
+    const card = document.querySelector('.card').getBoundingClientRect();
+    for (let i = 0; i < f.layout.n; i++) {
+      if (i === st.focus || ex.includes(i)) continue;
+      const p = f.project(i);
+      if (p.coc >= 26 || p.dist < 0.8 || p.x < 80 || p.x > innerWidth - 80 || p.y < 120 || p.y > innerHeight - 130) continue;
+      if (p.x > card.left - 30 && p.x < card.right + 30 && p.y > card.top - 30 && p.y < card.bottom + 30) continue;
+      if (f.pickAt(p.x, p.y, st.focus) === i && document.elementFromPoint(p.x, p.y)?.classList.contains('starfield')) return { i, x: p.x, y: p.y };
+    }
+    return null;
+  }, exclude);
+
+// b1 and b7: one breakpoint for js and css. phones in landscape get the narrow view, a landscape tablet keeps the desktop
+async function breakpointChecks(gpu) {
+  const main = await readFile(path.join(ROOT, 'js', 'main.js'), 'utf8');
+  const jsQueries = [...main.matchAll(/matchMedia\('([^']*)'\)/g)].map((m) => m[1]).filter((q) => /width|height/.test(q));
+  const blocks = [];
+  let stale = [];
+  for (const dir of ['css', 'js']) {
+    for (const f of await readdir(path.join(ROOT, dir))) {
+      if (!/\.(css|js)$/.test(f)) continue;
+      const text = await readFile(path.join(ROOT, dir, f), 'utf8');
+      if (/min-width:\s*721px/.test(text)) stale.push(`${dir}/${f}`);
+      if (dir === 'css') for (const m of text.matchAll(/@media ([^{]+)\{/g)) if (/720px|max-height/.test(m[1])) blocks.push({ file: `${dir}/${f}`, query: m[1].trim() });
+    }
+  }
+  check('one breakpoint: main.js and every narrow css block use the same query text, and nothing uses 721px', jsQueries.length === 1 && jsQueries[0] === NARROW_QUERY && blocks.length >= 2 && blocks.every((b) => b.query === NARROW_QUERY) && !stale.length, `${jsQueries.join(' | ')} || ${blocks.map((b) => `${b.file}: ${b.query}`).join(' | ')} || ${stale.join(', ')}`);
+
+  async function view({ width, height, touch }) {
+    const context = await gpu.newContext({ viewport: { width, height }, deviceScaleFactor: 2, hasTouch: touch, isMobile: touch });
+    const page = await context.newPage();
+    const logs = [];
+    const requests = [];
+    page.on('console', (m) => (m.type() === 'error' || m.type() === 'warning') && logs.push(m.text()));
+    page.on('pageerror', (e) => logs.push(e.message));
+    page.on('request', (r) => requests.push(r.url()));
+    await page.goto(`${ORIGIN}/`, { waitUntil: 'networkidle' });
+    await page.waitForSelector('.mode-toggle:not([hidden])', { timeout: 6000 }).catch(() => {});
+    await sleep(600);
+    const v = await page.evaluate((q) => ({
+      coarse: matchMedia('(pointer: coarse)').matches,
+      query: matchMedia(q).matches,
+      list: getComputedStyle(document.querySelector('.linktree')).display !== 'none',
+      sections: getComputedStyle(document.querySelector('.section')).display,
+      canvases: [...document.querySelectorAll('canvas')].map((c) => c.className).join(),
+      toggle: !document.querySelector('.mode-toggle').hidden,
+    }), NARROW_QUERY);
+    await context.close();
+    return { ...v, heavy: requests.filter((u) => /three|gsap|commits\.json|prs\.json|scene\//.test(u)), logs };
+  }
+  for (const [w, h, touch, want] of [[844, 390, true, 'list'], [932, 430, true, 'list'], [740, 360, true, 'list'], [390, 844, true, 'list'], [1440, 900, false, 'desktop'], [1024, 768, true, 'desktop']]) {
+    const v = await view({ width: w, height: h, touch });
+    const tag = `${w}x${h}${touch ? ' touch' : ''}`;
+    if (want === 'list') {
+      check(`breakpoint ${tag}: the list view, with no three.js, gsap, commit or pull request data and no scene canvas`, v.query && v.list && v.sections === 'none' && v.canvases === 'sky is-on' && !v.heavy.length && !v.logs.length && (v.coarse || !touch), JSON.stringify({ ...v, heavy: v.heavy.length }));
+    } else {
+      check(`breakpoint ${tag}: the desktop view`, !v.query && !v.list && v.sections !== 'none' && v.canvases.includes('starfield') && v.toggle && !v.logs.length && v.coarse === touch, JSON.stringify({ ...v, heavy: v.heavy.length }));
+    }
+  }
+
+  // back and forth across the breakpoint on a touch screen, by width and by turning a phone
+  {
+    const context = await gpu.newContext({ viewport: { width: 1440, height: 900 }, hasTouch: true });
+    const page = await context.newPage();
+    const logs = [];
+    page.on('console', (m) => (m.type() === 'error' || m.type() === 'warning') && logs.push(m.text()));
+    page.on('pageerror', (e) => logs.push(e.message));
+    await page.goto(`${ORIGIN}/`, { waitUntil: 'networkidle' });
+    await sceneReady(page);
+    const seen = [];
+    let lost = true;
+    for (const [w, h] of [[844, 390], [1440, 900], [932, 430], [1024, 768], [390, 844], [1280, 800]]) {
+      // the scene hands its gpu context back when it is disposed
+      await page.evaluate(() => (window.__gl = document.querySelector('canvas.starfield')?.getContext('webgl2') ?? window.__gl ?? null));
+      await page.setViewportSize({ width: w, height: h });
+      if (w > 1000) await page.waitForSelector('canvas.starfield', { timeout: 8000 }).catch(() => {});
+      await sleep(900);
+      const v = await page.evaluate((q) => ({ query: matchMedia(q).matches, list: getComputedStyle(document.querySelector('.linktree')).display !== 'none', canvases: [...document.querySelectorAll('canvas')].map((c) => c.className).join(), lost: window.__gl?.isContextLost() ?? null }), NARROW_QUERY);
+      if (v.query && v.lost === false) lost = false;
+      seen.push(`${w}x${h}:${v.query === v.list ? '' : 'DISAGREE '}${v.query ? 'list' : 'desktop'}:${v.canvases}`);
+    }
+    const expected = ['list:sky is-on', 'desktop:starfield', 'list:sky is-on', 'desktop:starfield', 'list:sky is-on', 'desktop:starfield'];
+    check('crossing the breakpoint back and forth swaps the views cleanly, js and css agreeing every time', seen.every((s, k) => s.endsWith(expected[k]) && !s.includes('DISAGREE')) && !logs.length, `${seen.join(' | ')} ${logs.join(' | ')}`);
+    check('a disposed scene hands its webgl context back', lost);
+    await context.close();
+  }
+}
+
+// regression checks for the fixes in the polish pass
+async function fixesChecks(gpu) {
+  const ENDPOINT = `${ORIGIN}/fake-now-playing`;
+  const fakeConfig = (route) => route.fulfill({ contentType: 'text/javascript', body: `export const NOW_PLAYING_URL = '${ENDPOINT}';` });
+  const ART = 'https://i.scdn.co/image/fake-art';
+  const artRoute = (route) => route.fulfill({ contentType: 'image/svg+xml', body: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64"><rect width="64" height="64" fill="#3f7f86"/></svg>' });
+
+  // b2: a second star clicked while a card is open keeps focus in the card, so escape closes the card only
+  // and the arrow keys keep stepping; a pinned language stays pinned
+  for (const pinned of [false, true]) {
+    await attempt(`a second star clicked with a card open${pinned ? ', a language pinned' : ''}`, async () => {
+      const { page, context, logs } = await open(gpu, `${ORIGIN}/?debug`, { width: 1440, height: 900 });
+      await sceneReady(page);
+      if (pinned) {
+        await page.locator('.legend-dot:not(.legend-all)').first().click();
+        await page.mouse.move(700, 880);
+        await sleep(400);
+      }
+      await page.click('.mode-toggle');
+      await sleep(900);
+      await page.click('.browse');
+      await sleep(1500);
+      const target = await clickableStar(page);
+      let v = null;
+      if (target) {
+        await page.mouse.click(target.x, target.y);
+        await sleep(1500);
+        const landed = await page.evaluate(() => ({ focus: window.__starfield.state().focus, inside: document.querySelector('.card').contains(document.activeElement) }));
+        await page.keyboard.press('ArrowLeft');
+        await sleep(1400);
+        let stepped = (await state(page)).focus;
+        if (stepped === landed.focus) {
+          await page.keyboard.press('ArrowRight');
+          await sleep(1400);
+          stepped = (await state(page)).focus;
+        }
+        await page.keyboard.press('Escape');
+        await sleep(1400);
+        const after = await page.evaluate(() => ({
+          stars: document.documentElement.classList.contains('is-stars'),
+          cardHidden: document.querySelector('.card').hidden,
+          focus: window.__starfield.state().focus,
+          browseFilter: window.__starfield.state().browseFilter,
+          pressed: document.querySelector('.legend-dot:not(.legend-all)').getAttribute('aria-pressed'),
+        }));
+        v = { target: target.i, landed, stepped, ...after };
+      }
+      const pinOk = pinned ? v?.pressed === 'true' && v.browseFilter === 0 : v?.pressed === 'false';
+      check(`a second star clicked with a card open${pinned ? ', a language pinned' : ''}: focus stays in the card, arrows step, escape closes only the card`, !!v && v.landed.focus === v.target && v.landed.inside && v.stepped !== v.landed.focus && v.stars && v.cardHidden && v.focus === -1 && pinOk, JSON.stringify(v));
+      check(`second star check${pinned ? ', pinned,' : ''} left the console clean`, !logs.length, logs.join(' | '));
+      await context.close();
+    });
+  }
+
+  // b3: a streak caught during the rocket launch is closed by the landing, which leaves stars mode in charge
+  await attempt('b3 launch and peek', async () => {
+    const { page, context, logs } = await open(gpu, `${ORIGIN}/?debug&prs=mock`, { width: 1440, height: 900 });
+    await sceneReady(page);
+    await page.evaluate(() => window.scrollTo(0, document.documentElement.scrollHeight));
+    await sleep(900);
+    await page.click('.rocket');
+    await page.waitForFunction(() => !!window.__launch);
+    // hold the flight just before it lands, the page already scrolled back to the top, and catch a streak there
+    // events on, so the scroll back to the top runs to its end. returns nothing: a timeline does not serialize
+    await page.evaluate(() => {
+      window.__launch.pause(1.36, false);
+    });
+    await sleep(300);
+    const s = await catchableStreak(page);
+    if (s) await page.mouse.click(s.screen.x, s.screen.y);
+    await sleep(500);
+    const peek = await page.evaluate(() => document.documentElement.classList.contains('is-peek'));
+    await page.evaluate(() => {
+      window.__launch.play();
+    });
+    await sleep(2500);
+    const v = await page.evaluate(() => {
+      const main = document.querySelector('main');
+      const st = window.__starfield.state();
+      return {
+        stars: document.documentElement.classList.contains('is-stars'),
+        peek: document.documentElement.classList.contains('is-peek'),
+        inert: main.inert && document.querySelector('.site-footer').inert,
+        visibility: getComputedStyle(main).visibility,
+        opacity: getComputedStyle(main).opacity,
+        overflow: getComputedStyle(document.documentElement).overflow,
+        mode: st.mode,
+        pr: st.pr,
+        label: document.querySelector('.mode-label').textContent,
+      };
+    });
+    check('a streak caught during the launch: the landing ends in stars mode, the page inert, hidden and not scrollable', !!s && peek && v.stars && !v.peek && v.inert && v.visibility === 'hidden' && v.opacity === '0' && v.overflow === 'hidden' && v.mode === 'stars' && !v.pr && v.label === 'back to page', `caught ${!!s}, peek ${peek}, ${JSON.stringify(v)}`);
+    check('launch and peek check left the console clean', !logs.length, logs.join(' | '));
+    await context.close();
+  });
+
+  // b4: browse pressed again during the fly back still returns home in the end
+  await attempt('b4 fly back', async () => {
+    const { page, context, logs } = await open(gpu, `${ORIGIN}/?debug`, { width: 1440, height: 900 });
+    await sceneReady(page);
+    await page.click('.mode-toggle');
+    await sleep(900);
+    await page.mouse.move(720, 870);
+    const home = (await state(page)).cam;
+    await page.click('.browse');
+    await sleep(1500);
+    await page.keyboard.press('Escape');
+    await sleep(250);
+    await page.click('.browse');
+    await sleep(1500);
+    const mid = await state(page);
+    await page.keyboard.press('Escape');
+    await sleep(1600);
+    const s = await state(page);
+    const off = Math.hypot(s.cam.x - home.x, s.cam.y - home.y, s.cam.z - home.z);
+    check('browse during the fly back, then escape: the camera ends at home', mid.focus === 0 && s.focus === -1 && !s.flying && off < 0.05, `off by ${off.toFixed(3)}, saved ${JSON.stringify(mid.saved)}, home ${JSON.stringify(home)}`);
+    check('fly back check left the console clean', !logs.length, logs.join(' | '));
+    await context.close();
+  });
+
+  // b5: nine languages fold into eight, picking and browsing keep working
+  await attempt('b5 nine languages', async () => {
+    const real = JSON.parse(await readFile(path.join(ROOT, 'data', 'commits.json'), 'utf8'));
+    const named = real.languages.filter((l) => l.name !== 'other').slice(0, 7);
+    const languages = [...named, { name: 'zig', slot: 6 }, { name: 'other', slot: 8 }];
+    const nine = { ...real, languages, repos: real.repos.map((r, i) => ({ ...r, lang: i % languages.length })) };
+    const context = await gpu.newContext({ viewport: { width: 1440, height: 900 } });
+    await context.route('**/data/commits.json', (route) => route.fulfill({ contentType: 'application/json', body: JSON.stringify(nine) }));
+    const page = await context.newPage();
+    const logs = [];
+    page.on('console', (m) => (m.type() === 'error' || m.type() === 'warning') && logs.push(m.text()));
+    page.on('pageerror', (e) => logs.push(e.message));
+    await page.goto(`${ORIGIN}/?debug`, { waitUntil: 'networkidle' });
+    await sceneReady(page);
+    await page.click('.mode-toggle');
+    await sleep(900);
+    // sweep the pointer over the field, which picks against every star each frame
+    for (let k = 0; k < 12; k++) {
+      await page.mouse.move(200 + k * 90, 200 + (k % 4) * 140);
+      await sleep(60);
+    }
+    await page.evaluate(() => window.__starfield.pin(7));
+    await sleep(400);
+    await page.click('.browse');
+    await sleep(1500);
+    const v = await page.evaluate(() => {
+      const f = window.__starfield;
+      return { dots: document.querySelectorAll('.legend-dot:not(.legend-all)').length, maxLang: Math.max(...f.layout.langs), focus: f.state().focus, card: !document.querySelector('.card').hidden, lang: f.layout.langs[f.state().focus] };
+    });
+    check('a nine language dataset folds into eight: picking, the legend and browsing work without errors', v.dots <= 8 && v.maxLang <= 7 && v.card && v.lang === 7 && !logs.length, `${JSON.stringify(v)} ${logs.slice(0, 3).join(' | ')}`);
+    await context.close();
+  });
+
+  // b6: a lost and restored gpu context paints the page background again, not black
+  await attempt('b6 context restore', async () => {
+    const { page, context, logs } = await open(gpu, `${ORIGIN}/?debug`, { width: 1440, height: 900 });
+    await sceneReady(page);
+    await sleep(600);
+    const clear = () => page.evaluate(() => {
+      const v = document.querySelector('canvas.starfield').getContext('webgl2').getParameter(0x0c22);
+      return v ? [...v].map((x) => Math.round(x * 255)) : null;
+    });
+    const before = await clear();
+    await page.evaluate(() => {
+      window.__lose = document.querySelector('canvas.starfield').getContext('webgl2').getExtension('WEBGL_lose_context');
+      window.__lose.loseContext();
+    });
+    await sleep(600);
+    await page.evaluate(() => window.__lose.restoreContext());
+    await sleep(1000);
+    const after = await clear();
+    const errors = logs.filter((l) => !/CONTEXT_LOST/.test(l));
+    check('after a lost and restored gpu context the clear color is the page background again', before?.join() === '6,8,11,255' && after?.join() === '6,8,11,255' && !errors.length, `before ${before}, after ${after} ${errors.join(' | ')}`);
+    await context.close();
+  });
+
+  // r3: a worker that never answers is dropped after 10 s, so the next poll still happens
+  await attempt('r3 satellite timeout', async () => {
+    const context = await gpu.newContext({ viewport: { width: 1440, height: 900 } });
+    await context.route('**/js/config.js', fakeConfig);
+    const calls = [];
+    const dropped = [];
+    await context.route('**/fake-now-playing', () => calls.push(Date.now()));
+    const page = await context.newPage();
+    const errors = [];
+    page.on('pageerror', (e) => errors.push(e.message));
+    page.on('requestfailed', (r) => r.url().includes('fake-now-playing') && dropped.push(Date.now()));
+    await page.goto(`${ORIGIN}/`, { waitUntil: 'load' });
+    await page.waitForFunction(() => document.querySelector('.mode-toggle:not([hidden])'), null, { timeout: 15000 }).catch(() => {});
+    for (let k = 0; k < 60 && !calls.length; k++) await sleep(250);
+    await sleep(11000);
+    const first = { calls: calls.length, dropped: dropped.length, after: dropped.length ? (dropped[0] - calls[0]) / 1000 : null };
+    for (let k = 0; k < 140 && calls.length < 2; k++) await sleep(250);
+    const gap = calls.length > 1 ? (calls[1] - dropped[0]) / 1000 : null;
+    check('satellite: a worker that never answers is dropped after 10 s and the next poll follows 30 s later', first.calls === 1 && first.dropped === 1 && first.after > 9 && first.after < 11.5 && gap > 28 && gap < 33 && !errors.length, `${JSON.stringify(first)}, next poll ${gap}s after the drop ${errors.join(' | ')}`);
+    await context.close();
+  });
+
+  // r4: the commit card fits short viewports and large text; view on github stays reachable
+  // the last case is too tall for any band, so it also proves the capped card scrolls to its link
+  for (const [name, w, h, scale] of [['1440x900 at 200% text', 1440, 900, 2], ['1024x500', 1024, 500, 1], ['1024x500 at 200% text', 1024, 500, 2]]) {
+    await attempt(`r4 commit card at ${name}`, async () => {
+      const context = await gpu.newContext({ viewport: { width: w, height: h } });
+      await context.route('https://github.com/**', (route) => route.fulfill({ contentType: 'text/html', body: '<title>github</title>' }));
+      const page = await context.newPage();
+      if (scale !== 1) {
+        const cdp = await context.newCDPSession(page);
+        await cdp.send('Page.setFontSizes', { fontSizes: { standard: 16 * scale, fixed: 13 * scale } });
+      }
+      const logs = [];
+      page.on('pageerror', (e) => logs.push(e.message));
+      await page.goto(`${ORIGIN}/?debug`, { waitUntil: 'networkidle' });
+      await sceneReady(page);
+      await page.click('.mode-toggle');
+      await sleep(900);
+      await page.click('.browse');
+      await sleep(1800);
+      const v = await page.evaluate(() => {
+        const card = document.querySelector('.card').getBoundingClientRect();
+        const box = document.querySelector('.card-scroll') ?? document.querySelector('.card-body');
+        const link = document.querySelector('.card [data-f="link"]');
+        const overflowing = box.scrollHeight > box.clientHeight + 1;
+        // scrolled the way a reader would, to the end of the card
+        box.scrollTop = box.scrollHeight;
+        const l = link.getBoundingClientRect();
+        const b = box.getBoundingClientRect();
+        const hit = document.elementFromPoint(l.left + l.width / 2, l.top + l.height / 2);
+        return {
+          rem: parseFloat(getComputedStyle(document.documentElement).fontSize),
+          card: { top: Math.round(card.top), bottom: Math.round(card.bottom), height: Math.round(card.height) },
+          overflowing,
+          linkInBox: l.top >= b.top - 0.5 && l.bottom <= b.bottom + 0.5,
+          linkOnScreen: l.top >= 0 && l.bottom <= innerHeight,
+          hit: !!hit && link.contains(hit),
+        };
+      });
+      const [popup] = await Promise.all([page.waitForEvent('popup', { timeout: 3000 }).catch(() => null), page.locator('.card [data-f="link"]').click({ timeout: 2000 }).catch(() => null)]);
+      const opened = popup ? new URL(popup.url()).hostname : null;
+      await popup?.close();
+      const scrolls = name === '1024x500 at 200% text' ? v.overflowing : true;
+      check(`commit card at ${name}: inside the viewport and view on github is reachable`, v.rem === 16 * scale && v.card.top >= 0 && v.card.bottom <= h && v.linkInBox && v.linkOnScreen && v.hit && scrolls && opened === 'github.com' && !logs.length, `${JSON.stringify(v)} popup ${opened} ${logs.join(' | ')}`);
+      await context.close();
+    });
+  }
+
+  // r6, s6: a 300 character one word title wraps inside the satellite label; the artwork goes without a referrer
+  await attempt('r6 long title', async () => {
+    const context = await gpu.newContext({ viewport: { width: 1440, height: 900 } });
+    await context.route('**/js/config.js', fakeConfig);
+    const word = 'Supercalifragilistic'.repeat(15);
+    await context.route('**/fake-now-playing', (route) => route.fulfill({ contentType: 'application/json', body: JSON.stringify({ state: 'playing', track: { name: word, artists: [word], album: 'x', image: ART, url: 'https://open.spotify.com/track/1', durationMs: 1, progressMs: 0 } }) }));
+    const referers = [];
+    await context.route('https://i.scdn.co/**', (route) => {
+      referers.push(route.request().headers().referer ?? null);
+      return artRoute(route);
+    });
+    const page = await context.newPage();
+    const logs = [];
+    page.on('pageerror', (e) => logs.push(e.message));
+    await page.goto(`${ORIGIN}/`, { waitUntil: 'networkidle' });
+    await page.waitForSelector('.orbit:not([hidden])', { timeout: 8000 }).catch(() => {});
+    await page.focus('.satellite').catch(() => {});
+    await sleep(600);
+    const v = await page.evaluate(() => {
+      const label = document.querySelector('.sat-label').getBoundingClientRect();
+      const parts = [...document.querySelectorAll('.sat-track, .sat-artists')];
+      return {
+        open: document.querySelector('.orbit').classList.contains('is-open'),
+        chars: document.querySelector('.sat-track').textContent.length,
+        overflow: Math.max(...parts.map((e) => e.scrollWidth - e.clientWidth)),
+        inside: parts.every((e) => e.getBoundingClientRect().right <= label.right + 0.5),
+        width: Math.round(label.width),
+        page: document.documentElement.scrollWidth - innerWidth,
+      };
+    });
+    check('satellite: a 300 character one word title and artist wrap inside the label', v.open && v.chars === 300 && v.overflow <= 1 && v.inside && v.width <= 15 * 16 + 2 && v.page <= 0 && !logs.length, JSON.stringify(v));
+    check('satellite: the album art is requested without a referrer', referers.length > 0 && referers.every((r) => r === null), referers.join(', '));
+    await context.close();
+  });
+  await attempt('s6 spotify card and sky', async () => {
+    const context = await gpu.newContext({ viewport: { width: 390, height: 844 }, deviceScaleFactor: 3, isMobile: true, hasTouch: true });
+    await context.route('**/js/config.js', fakeConfig);
+    await context.route('**/fake-now-playing', (route) => route.fulfill({ contentType: 'application/json', body: JSON.stringify({ state: 'playing', track: { name: 'Real Song', artists: ['Real Artist'], album: 'x', image: ART, url: 'https://open.spotify.com/track/1', durationMs: 1 } }) }));
+    const referers = [];
+    await context.route('https://i.scdn.co/**', (route) => {
+      referers.push(route.request().headers().referer ?? null);
+      return artRoute(route);
+    });
+    // counts frames the sky draws
+    await context.addInitScript(() => {
+      window.__skyDraws = 0;
+      const clear = CanvasRenderingContext2D.prototype.clearRect;
+      CanvasRenderingContext2D.prototype.clearRect = function (...a) {
+        if (this.canvas.classList?.contains('sky')) window.__skyDraws++;
+        return clear.apply(this, a);
+      };
+    });
+    const page = await context.newPage();
+    await page.goto(`${ORIGIN}/`, { waitUntil: 'load' });
+    await page.waitForSelector('.np-card.is-playing', { timeout: 5000 }).catch(() => {});
+    await sleep(800);
+    check('spotify card: the album art is requested without a referrer', referers.length > 0 && referers.every((r) => r === null), referers.join(', '));
+    const d0 = await page.evaluate(() => window.__skyDraws);
+    await sleep(2000);
+    const fps = ((await page.evaluate(() => window.__skyDraws)) - d0) / 2;
+    check('the 2d sky draws at about 30 frames a second', fps >= 24 && fps <= 32, `${fps} fps`);
+    await context.close();
+  });
+
+  // p1, p2: the satellite is only placed while it can be seen; the focus pulse only animates while visible
+  await attempt('p1 p2 satellite and pulse', async () => {
+    const { page, context, logs } = await open(gpu, `${ORIGIN}/?spotify=mock&debug`, { width: 1440, height: 900 });
+    await sceneReady(page);
+    await page.waitForSelector('.orbit:not([hidden])', { timeout: 8000 }).catch(() => {});
+    await page.mouse.move(40, 880);
+    const pos = () => page.evaluate(() => document.querySelector('.satellite').style.transform);
+    await page.click('.mode-toggle');
+    await sleep(900);
+    const a = await pos();
+    await sleep(800);
+    const b = await pos();
+    const pulse = () => page.evaluate(() => getComputedStyle(document.querySelector('.focus-pulse'), '::before').animationName);
+    const pulseClosed = await pulse();
+    await page.click('.browse');
+    await sleep(1500);
+    const pulseOpen = await pulse();
+    await page.keyboard.press('Escape');
+    await sleep(1400);
+    const pulseAfter = await pulse();
+    await page.click('.mode-toggle');
+    await sleep(150);
+    const c = await pos();
+    check('satellite: not placed while stars mode hides the page, placed again on return', a === b && c !== b, `${a} | ${b} | ${c}`);
+    await sleep(900);
+    await page.evaluate(() => window.scrollTo(0, 2400));
+    await sleep(700);
+    const d = await pos();
+    await sleep(800);
+    const e = await pos();
+    await page.evaluate(() => window.scrollTo(0, 0));
+    await sleep(300);
+    const f = await pos();
+    check('satellite: not placed while the hero is scrolled out of view, placed again when it returns', d === e && f !== e, `${d} | ${e} | ${f}`);
+    check('focus pulse: animates only while it is visible', pulseClosed === 'none' && pulseOpen === 'focus-pulse' && pulseAfter === 'none', `${pulseClosed} ${pulseOpen} ${pulseAfter}`);
+    check('satellite and pulse checks left the console clean', !logs.length, logs.join(' | '));
+    await context.close();
+  });
+
+  // p3: the commit data downloads while three.js is still loading
+  await attempt('p3 parallel data', async () => {
+    const context = await gpu.newContext({ viewport: { width: 1440, height: 900 } });
+    const page = await context.newPage();
+    const cdp = await context.newCDPSession(page);
+    await cdp.send('Network.enable');
+    await cdp.send('Network.emulateNetworkConditions', { offline: false, latency: 120, downloadThroughput: 1e6, uploadThroughput: 5e5 });
+    const t = {};
+    page.on('request', (r) => {
+      if (r.url().endsWith('/data/commits.json')) t.commits ??= Date.now();
+    });
+    page.on('requestfinished', (r) => {
+      if (r.url().endsWith('/three.core.js')) t.three ??= Date.now();
+    });
+    await page.goto(`${ORIGIN}/`, { waitUntil: 'load' });
+    await page.waitForSelector('.mode-toggle:not([hidden])', { timeout: 60000 }).catch(() => {});
+    check('the commit data is requested before three.js has finished loading', t.commits && t.three && t.commits < t.three, `commits requested ${t.commits - t.three}ms relative to three.core.js done`);
+    await context.close();
+  });
+
+  // s4: the 404 page shows only a short path with no spaces, and the line keeps its place either way
+  await attempt('s4 404 path', async () => {
+    const context = await gpu.newContext({ viewport: { width: 1280, height: 800 } });
+    const page = await context.newPage();
+    const rows = [];
+    for (const [p, want] of [['/missing-page', '/missing-page'], [`/${'b'.repeat(59)}`, `/${'b'.repeat(59)}`], [`/${'a'.repeat(70)}`, ''], ['/two%20words', ''], ['/tab%09here', '']]) {
+      await page.goto(`${ORIGIN}${p}`, { waitUntil: 'load' });
+      await sleep(200);
+      const v = await page.evaluate(() => {
+        const box = document.querySelector('.nf-path').getBoundingClientRect();
+        return { text: document.querySelector('.nf-path code').textContent, home: Math.round(document.querySelector('.nf-home').getBoundingClientRect().top), line: Math.round(box.height) };
+      });
+      rows.push({ p: p.slice(0, 16), ok: v.text === want, ...v, text: v.text.slice(0, 16) });
+    }
+    check('404 page: the path shows only when short with no whitespace, and nothing shifts when it is left out', rows.every((r) => r.ok && r.home === rows[0].home && r.line === rows[0].line && r.line > 0), JSON.stringify(rows));
+    await context.close();
+  });
+}
+
+// s1: the dev server answers bad paths with 404 and stays up, and only listens on loopback
+async function serveChecks() {
+  const { request } = await import('node:http');
+  const raw = (p) =>
+    new Promise((resolve) => {
+      const req = request({ host: '127.0.0.1', port: PORT, path: p }, (res) => {
+        res.resume();
+        res.on('end', () => resolve(res.statusCode));
+      });
+      req.on('error', (e) => resolve(`error ${e.code}`));
+      req.end();
+    });
+  const codes = {};
+  for (const p of ['/%E0%A4%A', '/%', '/..%2f..%2f..%2fetc%2fpasswd', '/sub/..%2f..%2fetc%2fpasswd', '/%2e%2e%2fREADME.md', '/tools/check.mjs', '/.git/HEAD']) codes[p] = await raw(p);
+  codes['/'] = await raw('/');
+  codes['/sub/'] = await raw('/sub/');
+  const bad = Object.entries(codes).filter(([p, c]) => (p === '/' || p === '/sub/' ? c !== 200 : c !== 404));
+  check('dev server: malformed escapes, traversal and private paths answer 404, and the server keeps serving', !bad.length, JSON.stringify(codes));
+  check('dev server: listens on 127.0.0.1 only', server.address().address === '127.0.0.1', JSON.stringify(server.address()));
+}
+
+// r2: print as a plain document, dark text on white with nothing of the screen effects.
+// the pages of a pdf and how many text operations each draws; streams are sliced by their /Length
+function pdfPages(buf) {
+  const text = buf.toString('latin1');
+  const objAt = (n) => {
+    const m = new RegExp(`(?:^|\\s)${n} 0 obj`).exec(text);
+    return m ? m.index + m[0].length : -1;
+  };
+  const stream = (n) => {
+    const at = objAt(n);
+    if (at < 0) return Buffer.alloc(0);
+    const head = text.slice(at, text.indexOf('stream', at));
+    const len = head.match(/\/Length (\d+)( 0 R)?/);
+    if (!len) return Buffer.alloc(0);
+    const size = len[2] ? Number(text.slice(objAt(Number(len[1]))).match(/^\s*(\d+)/)?.[1]) : Number(len[1]);
+    let from = at + head.length + 'stream'.length;
+    if (text[from] === '\r') from++;
+    if (text[from] === '\n') from++;
+    const data = buf.subarray(from, from + size);
+    try {
+      return /\/FlateDecode/.test(head) ? inflateSync(data) : data;
+    } catch {
+      return Buffer.alloc(0);
+    }
+  };
+  const pages = [];
+  for (const m of text.matchAll(/\/Type\s*\/Page\b(?!s)/g)) {
+    const dict = text.slice(text.lastIndexOf(' obj', m.index), text.indexOf('endobj', m.index));
+    const refs = [...(dict.match(/\/Contents\s*(\[[^\]]*\]|\d+ 0 R)/)?.[1] ?? '').matchAll(/(\d+) 0 R/g)].map((r) => Number(r[1]));
+    const ops = refs.map((r) => stream(r).toString('latin1')).join('\n');
+    pages.push({ text: (ops.match(/\bT[Jj]\b/g) ?? []).length });
+  }
+  return pages;
+}
+
+async function printChecks(gpu) {
+  const { page, context, logs } = await open(gpu, `${ORIGIN}/?debug`, { width: 1440, height: 900 });
+  await sceneReady(page);
+  // a pinned accent and stars mode, the worst case: the page is hidden and the reveals below the fold still pending
+  await page.locator('.legend-dot:not(.legend-all)').nth(1).click();
+  await page.click('.mode-toggle');
+  await sleep(900);
+  await page.emulateMedia({ media: 'print' });
+  await sleep(200);
+  const v = await page.evaluate(() => {
+    const lum = (c) => {
+      const [r, g, b] = c.match(/[\d.]+/g).slice(0, 3).map((x) => {
+        x /= 255;
+        return x <= 0.04045 ? x / 12.92 : ((x + 0.055) / 1.055) ** 2.4;
+      });
+      return 0.2126 * r + 0.7152 * g + 0.0722 * b;
+    };
+    const shown = (el) => getComputedStyle(el).display !== 'none' && getComputedStyle(el).visibility !== 'hidden';
+    const texts = [...document.querySelectorAll('main *, .site-footer *')].filter((el) => [...el.childNodes].some((n) => n.nodeType === 3 && n.textContent.trim()) && el.offsetParent !== null && !el.closest('.linktree, .sr-only'));
+    const contrast = texts.map((el) => (1.05) / (lum(getComputedStyle(el).color) + 0.05));
+    const hiddenReveals = [...document.querySelectorAll('[data-reveal], [data-reveal-group] > *, main, .site-footer')].filter((el) => { const s = getComputedStyle(el); return s.opacity !== '1' || s.visibility !== 'visible' || s.transform !== 'none'; });
+    return {
+      bg: getComputedStyle(document.body).backgroundColor,
+      worst: Math.min(...contrast),
+      texts: texts.length,
+      shadows: [...document.querySelectorAll('main, main *, .site-footer, .site-footer *')].filter((el) => getComputedStyle(el).textShadow !== 'none').length,
+      canvases: [...document.querySelectorAll('canvas')].filter(shown).length,
+      overlays: [...document.querySelectorAll('.skip, .topbar, .stars-ui, .orbit, .rocket, .card, .card-tether, .focus-pulse, .star-ring, .vignette, .linktree')].filter(shown).map((el) => el.className.baseVal ?? el.className),
+      hiddenReveals: hiddenReveals.length,
+      heroMin: getComputedStyle(document.querySelector('.hero')).minHeight,
+    };
+  });
+  check('print: white page, every text at least 4.5:1, no text shadows', v.bg === 'rgb(255, 255, 255)' && v.texts > 40 && v.worst >= 4.5 && !v.shadows, JSON.stringify({ bg: v.bg, texts: v.texts, worst: v.worst.toFixed(2), shadows: v.shadows }));
+  check('print: no canvas, skip link, top bar, stars ui, satellite, rocket, card or other overlay', !v.canvases && !v.overlays.length, JSON.stringify(v.overlays));
+  check('print: everything the reveals, the intro and stars mode hid is shown, hero min-height 0', !v.hiddenReveals && v.heroMin === '0px', `${v.hiddenReveals} hidden, hero min-height ${v.heroMin}`);
+  // the screen comes back exactly as it was. checked before printing to pdf: a pdf lays the page out at the paper's
+  // width, which can cross the breakpoint and rebuild the views
+  await page.emulateMedia({ media: 'screen' });
+  await sleep(200);
+  const screen = await page.evaluate(() => ({ bg: getComputedStyle(document.body).backgroundColor, canvas: getComputedStyle(document.querySelector('canvas.starfield')).display, main: getComputedStyle(document.querySelector('main')).visibility }));
+  check('print styles leave the screen untouched', screen.bg === 'rgb(6, 8, 11)' && screen.canvas === 'block' && screen.main === 'hidden', JSON.stringify(screen));
+  // a pdf renders with the emulated media, so print it is
+  await page.emulateMedia({ media: 'print' });
+  const reports = [];
+  for (const [format, margin] of [['A4', '12mm'], ['Letter', '0.5in']]) {
+    const pdf = await page.pdf({ format, margin: { top: margin, bottom: margin, left: margin, right: margin } });
+    if (format === 'A4') await writeFile(path.join(OUT, 'print-a4.pdf'), pdf);
+    const pages = pdfPages(pdf);
+    reports.push(`${format}: ${pages.length} pages, text ops per page ${pages.map((p) => p.text).join(',')}`);
+    check(`print to pdf (${format}, ${margin} margins): no blank pages`, pages.length > 1 && pages.every((p) => p.text > 0), reports.at(-1));
+  }
+  check('print checks left the console clean', !logs.length, logs.join(' | '));
+  await context.close();
+
+  // a phone prints the full page too, not the link list
+  {
+    const ctx = await gpu.newContext({ viewport: { width: 390, height: 844 }, deviceScaleFactor: 3, isMobile: true, hasTouch: true });
+    const p = await ctx.newPage();
+    await p.goto(`${ORIGIN}/`, { waitUntil: 'networkidle' });
+    await p.emulateMedia({ media: 'print' });
+    await sleep(200);
+    const n = await p.evaluate(() => ({ sections: [...document.querySelectorAll('.section')].filter((s) => getComputedStyle(s).display !== 'none').length, list: getComputedStyle(document.querySelector('.linktree')).display, sky: [...document.querySelectorAll('canvas')].filter((c) => getComputedStyle(c).display !== 'none').length, footer: getComputedStyle(document.querySelector('.site-footer')).display }));
+    const pages = pdfPages(await p.pdf({ format: 'A4', margin: { top: '12mm', bottom: '12mm', left: '12mm', right: '12mm' } }));
+    check('print from the narrow view: every section and the footer, no link list or sky, no blank pages', n.sections === 5 && n.list === 'none' && !n.sky && n.footer === 'flex' && pages.length > 1 && pages.every((pg) => pg.text > 0), `${JSON.stringify(n)} ${pages.length} pages`);
+    await ctx.close();
+  }
+}
+
 await mkdir(OUT, { recursive: true });
 const server = await startServer(PORT);
-const gpu = await chromium.launch(gpuLaunch);
+const gpu = await launch(gpuLaunch);
 try {
   if (want('static')) await staticChecks();
   if (want('load') || want('mobile')) await loadChecks(gpu);
@@ -2090,6 +3325,8 @@ try {
   if (want('pick')) await pickChecks(gpu);
   if (want('overscroll')) await overscrollChecks(gpu);
   if (want('chain')) await chainChecks(gpu);
+  if (want('browse')) await browseChecks(gpu);
+  if (want('narrow')) await narrowChecks(gpu);
   if (want('cardlayout')) await cardLayoutChecks(gpu);
   if (want('rocket')) await rocketChecks(gpu);
   if (want('texture')) await textureChecks(gpu);
@@ -2101,7 +3338,11 @@ try {
   if (want('blend')) await blendChecks(gpu);
   if (want('nebcolor')) await nebulaColorChecks(gpu);
   if (want('starscontrast')) await starsContrastChecks(gpu);
-  if (want('live')) await liveChecks(gpu);
+  if (want('breakpoint')) await breakpointChecks(gpu);
+  if (want('fixes')) await fixesChecks(gpu);
+  if (want('serve')) await serveChecks();
+  if (want('print')) await printChecks(gpu);
+  if (wantLive) await liveChecks(gpu);
 } finally {
   await gpu.close();
   server.close();

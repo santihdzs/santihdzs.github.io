@@ -5,8 +5,11 @@ dependencies. Every path is relative, so the site works from a domain root or a 
 
 On wide screens the page sits over a webgl starfield where every star is a real commit from the public `santihdzs`
 repos, and every gold shooting star is a real pull request to someone else's project. A small satellite in the hero
-shows what is playing on spotify. Screens 720px and narrower get a plain list of links and load no three.js, gsap,
-commit, pull request or spotify data.
+shows what is playing on spotify. Screens 720px and narrower, and phones held sideways (touch screens in landscape
+500px tall or less), get a list of links over a small 2d sky, with a spotify card last; they load no three.js, gsap,
+commit or pull request data. A landscape tablet keeps the full page. The one breakpoint is written once in
+`js/main.js`, and every narrow `@media` block in `css/` repeats the same query text:
+`(max-width: 720px), (max-height: 500px) and (pointer: coarse) and (orientation: landscape)`.
 
 > **Never run `wrangler` at the repo root.** Every wrangler command belongs inside `worker/`. At the root, wrangler
 > auto detects a static site and deploys the whole folder, tools and all, as a new worker.
@@ -22,6 +25,8 @@ js/
   legend.js, accent.js  language dots; a pinned language becomes the interface accent
   mode.js               stars only mode, the toggle, the rocket, the pull request peek
   satellite.js          now playing satellite
+  nowplaying.js         now playing samples, parser and fetch, shared by the satellite and the spotify card
+  narrow.js, sky.js     the narrow view: the spotify card and the 2d sky (the sky is shared with 404.html)
   config.js             the now playing endpoint
   texture.js            nebula constants and the ?texture switch
   palette.js            the 9 star colors
@@ -44,10 +49,11 @@ cv.pdf                  the cv
 ## running locally
 
 ```sh
-node tools/serve.mjs            # http://localhost:8080/ and http://localhost:8080/sub/
+node tools/serve.mjs            # http://127.0.0.1:8080/ and http://127.0.0.1:8080/sub/
 ```
 
-Any static server works; this one also serves everything under `/sub/` to prove relative paths hold. Opening
+Any static server works; this one also serves everything under `/sub/` to prove relative paths hold. It listens on
+loopback only. Opening
 `index.html` from disk does not work, because es modules and `fetch` need http.
 
 Useful url parameters:
@@ -92,9 +98,13 @@ mock data (`"mock": true`).
 ## now playing
 
 The satellite reads `NOW_PLAYING_URL` from `js/config.js`, which points at the worker:
-https://now-playing.santihdzs.workers.dev/now-playing. Any failure renders nothing. The worker caches answers for 20
-seconds, so visitors never reach spotify directly, and its responses never contain tokens or ids. Album art loads from
-spotify's image host (`i.scdn.co`), the one external host the site contacts besides the worker.
+https://now-playing.santihdzs.workers.dev/now-playing. When nothing is playing it shows the last played track: a paused
+track while the player session is alive (usually up to about 30 minutes), and after that, or in a private session, the
+last finished track. Any failure renders nothing. The worker caches answers for 20
+seconds, so visitors never reach spotify directly, and its responses never contain tokens or ids. When spotify cannot
+be asked, the worker repeats its last good answer for 2 minutes; after that a track it called playing shows as last
+played, and after an hour nothing shows. A refused token refresh is not retried for 5 minutes. Album art loads from
+spotify's image host (`i.scdn.co`) without a referrer, the one external host the site contacts besides the worker.
 
 The worker lives in `worker/` and is **deployed by hand**, never by the site or the workflow:
 
@@ -123,17 +133,19 @@ drawn over it, the official spotify icon sits beside it at 21px, the hover label
 
 ```sh
 cd tools && npm install
-node check.mjs              # every browser check (takes a while)
+node check.mjs              # every browser check except live (takes a while)
 node check.mjs prs          # or named sections: static load mobile interact reduced robust perf contrast align
-                            # pick overscroll chain cardlayout rocket texture accent satellite cards prs exits
-                            # blend nebcolor starscontrast live
+                            # pick overscroll chain browse narrow cardlayout rocket texture accent satellite cards
+                            # prs exits blend nebcolor starscontrast breakpoint fixes serve print live
+CHECK_LIVE=1 node check.mjs # everything, live included
 node lighthouse.mjs         # desktop and mobile
 node worker-test.mjs        # the worker against a fake spotify, cache and kv
 node auth-test.mjs          # the pkce helper against a fake accounts server
 ```
 
-The `live` section calls the real worker. Screenshots, rocket launch frames and lighthouse reports land in
-`tools/out/`, which is not committed.
+The `live` section calls the real worker, so it only runs when named or with `CHECK_LIVE=1`; every other run answers
+the worker's url with a local idle reply and never reaches it. Screenshots, rocket launch frames, a printed pdf and
+lighthouse reports land in `tools/out/`, which is not committed.
 
 ## license
 

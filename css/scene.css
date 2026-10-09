@@ -65,11 +65,17 @@
   inset: 0;
   border: 1px solid rgb(var(--accent-rgb) / 0.4);
   border-radius: 50%;
-  animation: focus-pulse 3.2s ease-in-out infinite;
+  /* the pulse's resting frame, so stopping it as the ring fades out never brightens it */
+  opacity: 0.55;
 }
 
 .focus-pulse.is-visible {
   opacity: 1;
+}
+
+/* it only runs while it can be seen */
+.focus-pulse.is-visible::before {
+  animation: focus-pulse 3.2s ease-in-out infinite;
 }
 
 @keyframes focus-pulse {
@@ -171,9 +177,15 @@
   transition: color 0.2s ease;
 }
 
-.browse:hover,
+.browse:not(:disabled):hover,
 .browse:focus-visible {
   color: var(--text);
+}
+
+/* a pinned language with nothing to browse */
+.browse:disabled {
+  opacity: 0.45;
+  cursor: default;
 }
 
 .readout {
@@ -201,7 +213,9 @@
 
 .card-body {
   position: relative;
-  padding: 1.05rem 1.2rem 0.95rem;
+  display: flex;
+  flex-direction: column;
+  max-height: calc(100vh - 32px);
   border: 1px solid var(--line);
   border-radius: 14px;
   background:
@@ -212,6 +226,14 @@
   -webkit-backdrop-filter: blur(12px);
   backdrop-filter: blur(12px);
   transform-style: preserve-3d;
+}
+
+/* a card taller than the viewport (a short window, large text) scrolls inside its edges, which stay unclipped */
+.card-scroll {
+  min-height: 0;
+  padding: 1.05rem 1.2rem 0.95rem;
+  border-radius: 13px;
+  overflow: auto;
 }
 
 /* a thin top highlight in the language color that fades out to the right */
@@ -580,8 +602,134 @@
     animation: none;
   }
 
-  .focus-pulse::before {
+  .focus-pulse::before,
+  .focus-pulse.is-visible::before {
     animation: none;
     opacity: 0.35;
+  }
+}
+
+/* print: the page as a plain document, dark text on white. it sits last in the last stylesheet so it wins,
+   and it undoes the narrow rules too, since a narrow page box (a4 with margins is under 720px) matches them */
+@media print {
+  :root {
+    color-scheme: light;
+    --bg: #fff;
+    --surface: transparent;
+    --surface-2: transparent;
+    --line: rgb(0 0 0 / 0.14);
+    --line-strong: rgb(0 0 0 / 0.3);
+    --text: #111;
+    --muted: #4a4f55;
+    /* over a pinned language's accent, which is written inline on the root */
+    --accent: #15803d !important;
+    --accent-rgb: 21 128 61 !important;
+  }
+
+  html,
+  body {
+    background: #fff;
+    color: var(--text);
+  }
+
+  body {
+    min-height: 0;
+  }
+
+  /* stars mode and a peek lock the page's scroll on screen; on paper it runs its full length */
+  .is-stars,
+  .is-peek {
+    overflow: visible;
+  }
+
+  .starfield,
+  .sky,
+  .vignette,
+  .topbar,
+  .stars-ui,
+  .orbit,
+  .rocket,
+  .rocket-flyer,
+  .skip,
+  .card,
+  .card-tether,
+  .focus-pulse,
+  .star-ring,
+  .linktree {
+    display: none !important;
+  }
+
+  /* whatever the reveals, the intro or stars mode left hidden or moved */
+  main,
+  .site-footer,
+  [data-intro],
+  [data-reveal],
+  [data-reveal-group] > * {
+    opacity: 1 !important;
+    visibility: visible !important;
+    transform: none !important;
+    animation: none !important;
+  }
+
+  *,
+  *::before,
+  *::after {
+    text-shadow: none !important;
+  }
+
+  .hero {
+    display: block;
+    min-height: 0;
+    padding-block: 0 2rem;
+  }
+
+  .hero-inner {
+    display: block;
+    max-width: 44rem;
+    text-align: left;
+  }
+
+  .hero-name {
+    margin-top: 1.1rem;
+    font-size: 2.5rem;
+  }
+
+  .hero-kicker {
+    margin-top: 0;
+    font-size: var(--mono-m);
+  }
+
+  .hero-lede {
+    display: block;
+  }
+
+  .hero-links {
+    display: flex;
+  }
+
+  .section {
+    display: grid;
+    padding-block: 1.75rem;
+  }
+
+  .rail {
+    position: static;
+  }
+
+  .rail,
+  .sub {
+    break-after: avoid;
+  }
+
+  .row,
+  .pub,
+  .tl-item,
+  .contact-list > div {
+    break-inside: avoid;
+  }
+
+  .site-footer {
+    display: flex;
+    padding-block: 2rem 0;
   }
 }

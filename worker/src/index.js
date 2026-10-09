@@ -8,6 +8,12 @@ const CACHE_SECONDS = 20;
 const KV_KEY = 'spotify_refresh_token';
 const PRODUCTION_ORIGIN = 'https://santihdzs.com';
 const IDLE = { state: 'idle' };
+// when spotify fails, the last good answer only covers a short blip: past STALE_MS a track it called
+// playing reads as last played, and past IDLE_MS it shows nothing
+const STALE_MS = 2 * 60_000;
+const IDLE_MS = 60 * 60_000;
+// a refused token refresh is not retried for this long
+const REFRESH_BACKOFF_MS = 5 * 60_000;
 
 // per isolate state. isolates are reused across requests but not guaranteed, so the cache api
 // and kv back this up.
@@ -16,6 +22,7 @@ let refreshing = null;
 let lastGood = null;
 let lastGoodAt = 0;
 let blockedUntil = 0;
+let refreshBlockedUntil = 0;
 
 export default {
   async fetch(request, env, ctx) {
@@ -36,7 +43,7 @@ export default {
       body = await nowPlaying(env, ctx, `${url.origin}/now-playing`);
     } catch (err) {
       console.log(`now playing failed: ${err?.name ?? 'error'}`);
-      body = lastGood ?? IDLE;
+      body = fallback();
     }
     return json(body, 200, cors, { 'cache-control': `public, max-age=${CACHE_SECONDS}` });
   },
@@ -84,12 +91,12 @@ async function nowPlaying(env, ctx, cacheUrl) {
     if (cached?.state) return remember(cached);
   }
 
-  if (now < blockedUntil) return lastGood ?? IDLE;
+  if (now < blockedUntil) return fallback();
   const fresh = await fromSpotify(env).catch((err) => {
     console.log(`spotify unreachable: ${err?.name ?? 'error'}`);
     return null;
   });
-  if (!fresh) return lastGood ?? IDLE;
+  if (!fresh) return fallback();
 
   remember(fresh);
   if (cache) {
@@ -107,15 +114,28 @@ function remember(body) {
   return body;
 }
 
-// currently playing first, then the last played track, then idle. null means "keep what we had".
+// what to answer when spotify cannot be asked: the last good answer, aged
+function fallback() {
+  const age = Date.now() - lastGoodAt;
+  if (!lastGood || age > IDLE_MS) return IDLE;
+  if (age > STALE_MS && lastGood.state === 'playing') {
+    const { progressMs, ...track } = lastGood.track;
+    return { state: 'recent', track: { ...track, playedAt: null } };
+  }
+  return lastGood;
+}
+
+// currently playing first, then a paused track, then the last finished track, then idle.
+// null means "keep what we had".
 async function fromSpotify(env) {
   const current = await spotify(env, '/currently-playing?additional_types=episode');
   if (current.status === 429 || current.status === 'auth') return null;
-  if (current.status === 200 && current.data?.is_playing && current.data.item) {
-    const track = shape(current.data.item);
-    if (track) return { state: 'playing', track: { ...track, progressMs: current.data.progress_ms ?? 0 } };
-  }
+  const now = current.status === 200 && current.data?.item ? shape(current.data.item) : null;
+  if (now && current.data.is_playing) return { state: 'playing', track: { ...now, progressMs: current.data.progress_ms ?? 0 } };
+  // paused or stopped on a track while the player session is alive. spotify gives no played_at here
+  if (now) return { state: 'recent', track: { ...now, playedAt: null } };
 
+  // recently played only lists finished tracks
   const recent = await spotify(env, '/recently-played?limit=1');
   if (recent.status === 429 || recent.status === 'auth') return null;
   const item = recent.data?.items?.[0];
@@ -159,6 +179,7 @@ async function spotify(env, path, retried = false) {
 
 async function accessToken(env, force) {
   if (!force && access.token && Date.now() < access.expires - 60_000) return access.token;
+  if (Date.now() < refreshBlockedUntil) return null;
   // one refresh at a time per isolate, so a rotated refresh token is never used twice
   refreshing ??= refresh(env).finally(() => {
     refreshing = null;
@@ -201,6 +222,7 @@ async function refresh(env) {
     return access.token;
   }
   access = { token: null, expires: 0 };
+  refreshBlockedUntil = Date.now() + REFRESH_BACKOFF_MS;
   return null;
 }
 

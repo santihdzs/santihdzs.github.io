@@ -1,8 +1,11 @@
 import { gsap } from 'gsap';
+import { MOCKS, parse, fetchNowPlaying } from './nowplaying.js';
 
 // now playing satellite: album art on a faint tilted orbit around the hero text.
 // any failure renders nothing and logs nothing. ?spotify=mock or ?spotify=mock-recent shows a sample.
 const POLL_MS = 30000;
+// a request that hangs this long is dropped, so the next poll is never blocked behind it
+const TIMEOUT_MS = 10000;
 const PERIOD = { playing: 90, recent: 240 };
 const TILT = (-9 * Math.PI) / 180;
 const SVG = 'http://www.w3.org/2000/svg';
@@ -11,34 +14,6 @@ const TEXT = '.hero-kicker, .hero-name, .hero-lede, .hero-links';
 // as it meets or clears the text. it dims on touch but only brightens once this far clear, so it never flickers on an edge
 const LEAD = 0.25;
 const CLEAR = 6;
-
-// stand in artwork for the mock, generated so the mock makes no network request
-const MOCK_ART = `data:image/svg+xml,${encodeURIComponent(
-  '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64"><defs><linearGradient id="a" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#2b3a67"/><stop offset=".55" stop-color="#3f7f86"/><stop offset="1" stop-color="#d9a066"/></linearGradient></defs><rect width="64" height="64" fill="url(#a)"/><circle cx="44" cy="22" r="9" fill="#f3e3c3" opacity=".85"/></svg>'
-)}`;
-
-const MOCKS = {
-  mock: {
-    state: 'playing',
-    track: { name: 'Lorem Ipsum Dolor', artists: ['Sit Amet', 'Consectetur'], album: 'Adipiscing Elit', image: MOCK_ART, url: 'https://open.spotify.com/', durationMs: 214000, progressMs: 61000 },
-  },
-  'mock-recent': {
-    state: 'recent',
-    track: { name: 'Sed Do Eiusmod Tempor', artists: ['Incididunt'], album: 'Ut Labore', image: MOCK_ART, url: 'https://open.spotify.com/', durationMs: 187000, playedAt: '2026-10-06T18:42:00Z' },
-  },
-};
-
-// only well formed payloads render; anything else counts as a failure
-function parse(body, mock) {
-  if (!body || !['playing', 'recent', 'idle'].includes(body.state)) return null;
-  if (body.state === 'idle') return { state: 'idle' };
-  const t = body.track;
-  const okImage = typeof t?.image === 'string' && (t.image.startsWith('https://') || (mock && t.image.startsWith('data:image/svg+xml')));
-  const okUrl = typeof t?.url === 'string' && t.url.startsWith('https://open.spotify.com/');
-  const artists = Array.isArray(t?.artists) ? t.artists.filter((a) => typeof a === 'string' && a) : [];
-  if (typeof t?.name !== 'string' || !t.name || !artists.length || !okImage || !okUrl) return null;
-  return { state: body.state, track: { name: t.name, artists, image: t.image, url: t.url } };
-}
 
 export function createSatellite({ endpoint, mock, reduced }) {
   const hero = document.querySelector('.hero');
@@ -60,7 +35,7 @@ export function createSatellite({ endpoint, mock, reduced }) {
     </svg>
     <a class="satellite" target="_blank" rel="noopener">
       <span class="sat-body">
-        <img class="sat-art" alt="" width="32" height="32" decoding="async">
+        <img class="sat-art" alt="" width="32" height="32" decoding="async" referrerpolicy="no-referrer">
         <span class="sat-side">
           <img class="sat-icon" src="./assets/spotify-icon-white.svg" alt="" width="22" height="21">
           <span class="sat-eq" aria-hidden="true"><i></i><i></i><i></i></span>
@@ -96,6 +71,8 @@ export function createSatellite({ endpoint, mock, reduced }) {
   let controller = null;
   let disposed = false;
   let last = performance.now();
+  // the orbit keeps turning while nobody can see it, but the tile is only placed while it can be seen
+  let onScreen = true;
 
   function layout() {
     const w = hero.clientWidth;
@@ -170,7 +147,7 @@ export function createSatellite({ endpoint, mock, reduced }) {
       return;
     }
     angle += ((dt * Math.PI * 2) / PERIOD[state.state]) * motion.speed;
-    place();
+    if (seen()) place();
   }
 
   function render(next) {
@@ -206,13 +183,14 @@ export function createSatellite({ endpoint, mock, reduced }) {
       render(parse(mockBody, true));
       return;
     }
-    controller = new AbortController();
+    const c = (controller = new AbortController());
+    const slow = setTimeout(() => c.abort(), TIMEOUT_MS);
     try {
-      const res = await fetch(endpoint, { signal: controller.signal, credentials: 'omit', cache: 'no-store' });
-      render(res.ok ? parse(await res.json(), false) : null);
+      render(await fetchNowPlaying(endpoint, c.signal));
     } catch (err) {
       if (err?.name !== 'AbortError') render(null);
     } finally {
+      clearTimeout(slow);
       controller = null;
       if (active()) timer = setTimeout(poll, POLL_MS);
     }
@@ -234,6 +212,7 @@ export function createSatellite({ endpoint, mock, reduced }) {
   // comes back. other class changes on the root, like the streak hover, must not fetch.
   const hiddenPage = () => document.documentElement.matches('.is-stars, .is-peek');
   let wasStars = hiddenPage();
+  const seen = () => onScreen && !wasStars;
   const watcher = new MutationObserver(() => {
     const stars = hiddenPage();
     if (stars === wasStars) return;
@@ -241,8 +220,19 @@ export function createSatellite({ endpoint, mock, reduced }) {
     if (stars) {
       clearTimeout(timer);
       controller?.abort();
-    } else poll();
+    } else {
+      if (!orbit.hidden && onScreen) place();
+      poll();
+    }
   });
+  // the margin covers the part of the orbit that can reach past the hero's box
+  const sighting = new IntersectionObserver(
+    ([entry]) => {
+      onScreen = entry.isIntersecting;
+      if (seen() && !orbit.hidden) place();
+    },
+    { rootMargin: '80px' }
+  );
 
   const resizer = new ResizeObserver(layout);
   // text boxes change size when the fonts arrive
@@ -257,6 +247,7 @@ export function createSatellite({ endpoint, mock, reduced }) {
   watcher.observe(document.documentElement, { attributes: true, attributeFilter: ['class'] });
   resizer.observe(anchor);
   resizer.observe(hero);
+  sighting.observe(hero);
   gsap.ticker.add(tick);
   poll();
 
@@ -269,6 +260,7 @@ export function createSatellite({ endpoint, mock, reduced }) {
       gsap.killTweensOf(motion);
       watcher.disconnect();
       resizer.disconnect();
+      sighting.disconnect();
       document.fonts?.removeEventListener('loadingdone', onFonts);
       document.removeEventListener('visibilitychange', onVisibility);
       orbit.remove();

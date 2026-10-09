@@ -21,35 +21,37 @@ const isoDate = (iso) => formatDate(Date.parse(iso) / 1000);
 const TEMPLATE = `
   <div class="card-in">
     <div class="card-body">
-      <div class="card-layer card-head">
-        <span class="lang-chip" data-c><span class="lang-dot"></span><span data-f="lang"></span></span>
-        <span class="org" data-p aria-hidden="true"><img class="org-logo" alt="" width="28" height="28" decoding="async"><span class="org-mono"></span></span>
-        <span class="card-repo" data-f="repo"></span>
-        <button class="card-close" type="button" aria-label="close">
-          <svg viewBox="0 0 12 12" aria-hidden="true" focusable="false"><path d="M2.5 2.5l7 7M9.5 2.5l-7 7" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/></svg>
-        </button>
-      </div>
-      <div class="card-layer card-main">
-        <p class="card-date"><span class="merged-chip" data-f="chip">merged</span><span data-f="date"></span></p>
-        <h2 class="card-msg" id="card-msg"><span data-f="msg"></span><span class="pr-num" data-p data-f="num"></span></h2>
-      </div>
-      <div class="card-layer card-stats">
-        <p class="card-diff">
-          <span class="add" data-f="add"></span>
-          <span class="del" data-f="del"></span>
-          <span class="diff-bar" aria-hidden="true"><i class="diff-add"></i><i class="diff-del"></i></span>
-          <span class="card-files" data-f="files"></span>
-        </p>
-        <p class="card-ids" data-c>
-          <button class="hash-chip" type="button" data-f="hash"></button>
-          <span data-f="count"></span>
-          <span data-f="pos"></span>
-        </p>
-      </div>
-      <div class="card-layer card-nav">
-        <button class="card-step" type="button" data-c data-step="-1" aria-label="previous commit in this repo">&lsaquo; prev</button>
-        <button class="card-step" type="button" data-c data-step="1" aria-label="next commit in this repo">next &rsaquo;</button>
-        <a class="tlink" data-f="link" target="_blank" rel="noopener"><span data-f="linkText"></span><svg class="i" aria-hidden="true" focusable="false"><use href="#i-arrow"/></svg></a>
+      <div class="card-scroll">
+        <div class="card-layer card-head">
+          <span class="lang-chip" data-c><span class="lang-dot"></span><span data-f="lang"></span></span>
+          <span class="org" data-p aria-hidden="true"><img class="org-logo" alt="" width="28" height="28" decoding="async"><span class="org-mono"></span></span>
+          <span class="card-repo" data-f="repo"></span>
+          <button class="card-close" type="button" aria-label="close">
+            <svg viewBox="0 0 12 12" aria-hidden="true" focusable="false"><path d="M2.5 2.5l7 7M9.5 2.5l-7 7" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/></svg>
+          </button>
+        </div>
+        <div class="card-layer card-main">
+          <p class="card-date"><span class="merged-chip" data-f="chip">merged</span><span data-f="date"></span></p>
+          <h2 class="card-msg" id="card-msg"><span data-f="msg"></span><span class="pr-num" data-p data-f="num"></span></h2>
+        </div>
+        <div class="card-layer card-stats">
+          <p class="card-diff">
+            <span class="add" data-f="add"></span>
+            <span class="del" data-f="del"></span>
+            <span class="diff-bar" aria-hidden="true"><i class="diff-add"></i><i class="diff-del"></i></span>
+            <span class="card-files" data-f="files"></span>
+          </p>
+          <p class="card-ids" data-c>
+            <button class="hash-chip" type="button" data-f="hash"></button>
+            <span data-f="count"></span>
+            <span data-f="pos"></span>
+          </p>
+        </div>
+        <div class="card-layer card-nav">
+          <button class="card-step" type="button" data-c data-step="-1" aria-label="previous commit in this repo">&lsaquo; prev</button>
+          <button class="card-step" type="button" data-c data-step="1" aria-label="next commit in this repo">next &rsaquo;</button>
+          <a class="tlink" data-f="link" target="_blank" rel="noopener"><span data-f="linkText"></span><svg class="i" aria-hidden="true" focusable="false"><use href="#i-arrow"/></svg></a>
+        </div>
       </div>
     </div>
   </div>`;
@@ -166,14 +168,29 @@ export function createCard({ data, reduced, owner, onClose, onStep }) {
     f.hash.classList.remove('is-copied');
     f.hash.textContent = c.sha.slice(0, 7);
     f.hash.setAttribute('aria-label', `copy full commit hash, ${c.sha.slice(0, 7)}`);
-    f.count.textContent = `${nav.index} of ${nav.total}`;
-    f.pos.textContent = `${nav.repoIndex} of ${nav.repoTotal} in this repo`;
     f.link.href = `https://github.com/${owner}/${encodeURIComponent(repo.name)}/commit/${c.sha}`;
     f.linkText.textContent = 'view on github';
+    fillNav(index, nav, true);
+  }
+
+  // the counters and steps, also refreshed in place when the pinned language changes under an open card.
+  // a commit outside the pinned language has no place in its count, so that part is hidden
+  function fillNav(index, nav, announce) {
+    const c = data.commits[index];
+    const repo = data.repos[c.repo];
+    const langName = repo.primary ?? data.languages[c.lang].name;
+    f.count.hidden = nav.index === null;
+    f.count.textContent = nav.index === null ? '' : `${nav.index} of ${nav.total}`;
+    f.pos.textContent = `${nav.repoIndex} of ${nav.repoTotal} in this repo`;
+    const had = document.activeElement;
     prev.disabled = !nav.canPrev;
     next.disabled = !nav.canNext;
+    // a step button that turns off while focused would drop keyboard focus out of the card
+    if ((had === prev && prev.disabled) || (had === next && next.disabled)) el.focus({ preventScroll: true });
+    if (!announce) return;
     const files = c.files == null ? '' : `, ${c.files} ${c.files === 1 ? 'file' : 'files'} changed`;
-    live.textContent = `${c.message}. ${repo.name}, ${formatDate(c.ts)}. ${c.additions} additions, ${c.deletions} deletions${files}. ${langName}. commit ${nav.index} of ${nav.total}.`;
+    const count = nav.index === null ? '' : ` commit ${nav.index} of ${nav.total}.`;
+    live.textContent = `${c.message}. ${repo.name}, ${formatDate(c.ts)}. ${c.additions} additions, ${c.deletions} deletions${files}. ${langName}.${count}`;
   }
 
   function fillPr({ pr }) {
@@ -271,14 +288,14 @@ export function createCard({ data, reduced, owner, onClose, onStep }) {
   const keyOf = (entry) => (entry.kind === 'pr' ? `pr:${entry.pr.url}` : `commit:${entry.index}`);
 
   return {
-    get index() {
-      return open && kind === 'commit' ? Number(entryKey.slice(7)) : -1;
-    },
     get isOpen() {
       return open;
     },
     get kind() {
       return kind;
+    },
+    setNav(nav) {
+      if (open && kind === 'commit') fillNav(Number(entryKey.slice(7)), nav, false);
     },
     // entry is { kind: 'commit', index, nav } or { kind: 'pr', pr }
     show(entry, opener) {
@@ -290,19 +307,21 @@ export function createCard({ data, reduced, owner, onClose, onStep }) {
         if (rm) {
           fill(entry);
           gsap.set(layers, { opacity: 1 });
-          return;
+        } else {
+          gsap.to(layers, {
+            opacity: 0,
+            duration: 0.09,
+            ease: 'power1.in',
+            overwrite: true,
+            onComplete: () => {
+              if (entryKey !== key) return;
+              fill(entry);
+              gsap.to(layers, { opacity: 1, duration: 0.09, ease: 'power1.out' });
+            },
+          });
         }
-        gsap.to(layers, {
-          opacity: 0,
-          duration: 0.09,
-          ease: 'power1.in',
-          overwrite: true,
-          onComplete: () => {
-            if (entryKey !== key) return;
-            fill(entry);
-            gsap.to(layers, { opacity: 1, duration: 0.09, ease: 'power1.out' });
-          },
-        });
+        // escape and the arrow keys belong to the card for as long as it is open
+        if (!el.contains(document.activeElement)) el.focus({ preventScroll: true });
         return;
       }
       fill(entry);
@@ -384,7 +403,10 @@ export function createCard({ data, reduced, owner, onClose, onStep }) {
       if (side === 'right' && roomRight < width && roomLeft > roomRight) side = 'left';
       else if (side === 'left' && roomLeft < width && roomRight > roomLeft) side = 'right';
       const tx = clamp(side === 'right' ? target.x + gap : target.x - gap - width, view.left + margin, view.left + view.w - margin - width);
-      const ty = clamp(target.y - height / 2, top, Math.max(top, bottom - height));
+      // a card too tall for the band between the top bar and the stars ui rises only as far as it must,
+      // at most to the margin; css caps its height there, so its links always stay on screen
+      const high = Math.max(view.top + margin, Math.min(top, bottom - height));
+      const ty = clamp(target.y - height / 2, high, Math.max(high, bottom - height));
       const k = rm || snap ? 1 : 1 - Math.exp(-dt * 7);
       snap = false;
       pos.x += (tx - pos.x) * k;

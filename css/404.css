@@ -1,0 +1,81 @@
+/* the 404 page: one centered block over a calm canvas starfield */
+
+.nf-sky {
+  position: fixed;
+  inset: 0;
+  z-index: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 1.2s ease;
+}
+
+.nf-sky.is-on {
+  opacity: 1;
+}
+
+.nf {
+  position: relative;
+  z-index: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  min-height: 100vh;
+  min-height: 100svh;
+  padding: 3rem var(--gutter);
+  text-align: center;
+}
+
+.nf-code {
+  font: 400 var(--mono-s) / 1.4 var(--font-mono);
+  color: var(--muted);
+  letter-spacing: 0.04em;
+}
+
+.nf-title {
+  margin-top: 0.9rem;
+  font-size: var(--step-2);
+  font-weight: 400;
+  line-height: 1.35;
+  letter-spacing: -0.01em;
+}
+
+.nf-text {
+  max-width: 34rem;
+  margin-top: 0.75rem;
+  color: var(--muted);
+  text-wrap: balance;
+}
+
+/* one reserved line, so filling in the path never moves anything */
+.nf-path {
+  max-width: min(100%, 44ch);
+  min-height: 1.5em;
+  margin-top: 1.4rem;
+  overflow: hidden;
+  font: 400 var(--mono-s) / 1.5 var(--font-mono);
+  color: var(--muted);
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.nf-path code {
+  font: inherit;
+}
+
+.nf-path:has(code:empty) {
+  visibility: hidden;
+}
+
+.nf-home {
+  margin-top: 2.2rem;
+  font-size: var(--mono-m);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .nf-sky {
+    transition: none;
+  }
+}
