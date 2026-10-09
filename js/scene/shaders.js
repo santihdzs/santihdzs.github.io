@@ -16,8 +16,19 @@ vec3 litSphere(vec2 q, vec3 color, vec2 light) {
 }
 `;
 
+// the text mode dim's shape across the screen: 1 over the content column, easing to 0 toward the sides.
+// uColumn holds the column's left and right edges and half the feather, as shares of the viewport width
+export const COLUMN = /* glsl */ `
+uniform vec4 uColumn;
+float column(vec4 clip) {
+  float x = clip.x / max(clip.w, 1e-4) * 0.5 + 0.5;
+  return smoothstep(uColumn.x - uColumn.z, uColumn.x + uColumn.z, x) * (1.0 - smoothstep(uColumn.y - uColumn.z, uColumn.y + uColumn.z, x));
+}
+`;
+
 export const vertexShader = /* glsl */ `
 ${OPTICS}
+${COLUMN}
 attribute float aSize;
 attribute vec3 aColor;
 attribute float aLang;
@@ -33,6 +44,7 @@ uniform float uMaxPoint;
 uniform float uHi[${MAX_LANGS}];
 uniform float uLo[${MAX_LANGS}];
 uniform float uFocusId;
+uniform float uDim;
 
 varying vec3 vColor;
 varying float vAlpha;
@@ -60,12 +72,12 @@ void main() {
   alpha *= mix(1.0, 0.35, smoothstep(uFocal + 10.0, uFocal + 38.0, dist));
   alpha *= uIntensity;
 
-  vColor = aColor;
-  vAlpha = alpha;
-  vBlur = coc / size;
-  vCore = core;
   gl_PointSize = min(size * SPRITE * uDpr, uMaxPoint);
   gl_Position = projectionMatrix * mv;
+  vColor = aColor;
+  vAlpha = alpha * (1.0 - uDim * column(gl_Position));
+  vBlur = coc / size;
+  vCore = core;
 }
 `;
 

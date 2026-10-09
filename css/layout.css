@@ -153,6 +153,8 @@ main,
   align-self: start;
   position: sticky;
   top: calc(var(--topbar-h) + 1rem);
+  /* where a number key lands the label: its pinned place, clear of the top bar and any safe area */
+  scroll-margin-top: calc(var(--topbar-h) + 1rem + env(safe-area-inset-top, 0px));
   padding-top: 0.3rem;
   font: 400 var(--mono-m) / 1.4 var(--font-mono);
   color: var(--muted);

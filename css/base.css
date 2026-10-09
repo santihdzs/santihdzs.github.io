@@ -58,7 +58,9 @@ button {
   border-radius: 4px;
 }
 
-main:focus {
+/* main and a section take focus from a skip link or a number key, never as a control */
+main:focus,
+.section:focus {
   outline: none;
 }
 

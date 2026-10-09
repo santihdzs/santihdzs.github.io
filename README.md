@@ -22,6 +22,7 @@ css/                    tokens (colors, type, spacing), base, layout, components
 js/
   main.js               entry point: decides narrow vs wide and lazy loads the rest
   reveal.js, rows.js    scroll reveals, row hover glow
+  jump.js               number keys on the wide page: 0 the top, 1 to 5 the sections numbered in their labels
   legend.js, accent.js  language dots; a pinned language becomes the interface accent
   mode.js               stars only mode, the toggle, the rocket, the pull request peek
   satellite.js          now playing satellite
@@ -136,7 +137,7 @@ cd tools && npm install
 node check.mjs              # every browser check except live (takes a while)
 node check.mjs prs          # or named sections: static load mobile interact reduced robust perf contrast align
                             # pick overscroll chain browse narrow cardlayout rocket texture accent satellite cards
-                            # prs exits blend nebcolor starscontrast breakpoint fixes serve print live
+                            # prs exits blend nebcolor starscontrast breakpoint fixes dim readout keys serve print live
 CHECK_LIVE=1 node check.mjs # everything, live included
 node lighthouse.mjs         # desktop and mobile
 node worker-test.mjs        # the worker against a fake spotify, cache and kv

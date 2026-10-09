@@ -5,14 +5,15 @@ const MONTHS = ['jan', 'feb', 'mar', 'apr', 'may', 'jun', 'jul', 'aug', 'sep', '
 const SVG = 'http://www.w3.org/2000/svg';
 const MAX_TILT = 3;
 
-export function formatDate(ts) {
-  const d = new Date(ts * 1000);
-  return `${d.getDate()} ${MONTHS[d.getMonth()]} ${d.getFullYear()}`;
-}
-
+// local time, like every date the page shows. the card's date carries the readout's month verbatim, so the two
+// can never name different months for one commit
 export function formatMonth(ts) {
   const d = new Date(ts * 1000);
   return `${MONTHS[d.getMonth()]} ${d.getFullYear()}`;
+}
+
+export function formatDate(ts) {
+  return `${new Date(ts * 1000).getDate()} ${formatMonth(ts)}`;
 }
 
 const isoDate = (iso) => formatDate(Date.parse(iso) / 1000);

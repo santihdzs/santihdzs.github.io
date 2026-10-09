@@ -1,7 +1,7 @@
 import * as THREE from 'three';
 import { gsap } from 'gsap';
 import { GLSL as OPTICS, SPRITE } from './optics.js';
-import { SPHERE } from './shaders.js';
+import { SPHERE, COLUMN } from './shaders.js';
 
 // the cadence: one streak every 10 to 20 seconds, never two at once
 const STREAK_INTERVAL = [10, 20];
@@ -16,16 +16,20 @@ const IGNORE = 'a, button, input, select, textarea, label, summary, [role="butto
 
 const headVertex = /* glsl */ `
 ${OPTICS}
+${COLUMN}
 uniform float uPx;
 uniform float uDpr;
 uniform float uMaxPoint;
+uniform float uDim;
 varying float vCore;
+varying float vDim;
 void main() {
   vec4 mv = modelViewMatrix * vec4(position, 1.0);
   float dist = max(-mv.z, 0.001);
   vCore = starCore(uPx, ${HEAD_SIZE.toFixed(3)}, dist);
   gl_PointSize = min(vCore * SPRITE * uDpr, uMaxPoint);
   gl_Position = projectionMatrix * mv;
+  vDim = 1.0 - uDim * column(gl_Position);
 }
 `;
 
@@ -36,6 +40,7 @@ uniform vec3 uColor;
 uniform vec2 uLight;
 uniform float uAlpha;
 varying float vCore;
+varying float vDim;
 void main() {
   vec2 c = gl_PointCoord * 2.0 - 1.0;
   float r2 = dot(c, c);
@@ -49,26 +54,32 @@ void main() {
   // a tiny head is a bright point, a near one reads as a small gold sphere
   float shade = smoothstep(5.0, 14.0, vCore) * (1.0 - smoothstep(0.92, 1.0, dot(q, q)));
   vec3 col = mix(point, litSphere(q, uColor, uLight), shade);
-  gl_FragColor = vec4(mix(uColor, col, disc), (disc * 0.95 + halo) * uAlpha);
+  gl_FragColor = vec4(mix(uColor, col, disc), (disc * 0.95 + halo) * uAlpha * vDim);
 }
 `;
 
+// the tail lies flat to the screen, so its clip position interpolates linearly and the dim runs per fragment
 const tailVertex = /* glsl */ `
 varying vec2 vUv;
+varying vec4 vClip;
 void main() {
   vUv = uv;
   gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+  vClip = gl_Position;
 }
 `;
 
 const tailFragment = /* glsl */ `
+${COLUMN}
 uniform vec3 uColor;
 uniform float uAlpha;
+uniform float uDim;
 varying vec2 vUv;
+varying vec4 vClip;
 void main() {
   float across = abs(vUv.y - 0.5) * 2.0;
   float a = pow(vUv.x, 1.6) * (1.0 - smoothstep(0.2, 1.0, across)) * uAlpha;
-  gl_FragColor = vec4(uColor, a);
+  gl_FragColor = vec4(uColor, a * (1.0 - uDim * column(vClip)));
 }
 `;
 
@@ -90,6 +101,9 @@ export function createStreaks({ prs, reduced, scene, camera, view, uniforms, can
   const inert = { pointer() {}, frame() {}, pause() {}, resume() {}, dispose() {}, fireNow: () => false, screen: () => null, headWorld: () => null, debug: () => null };
   if (!prs.length) return inert;
 
+  // the text mode dim, shared by head and tail; hover and an open card lift it
+  const dim = { value: 0 };
+  const lift = { v: 0 };
   const headGeo = new THREE.BufferGeometry();
   headGeo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(3), 3));
   const headMat = new THREE.ShaderMaterial({
@@ -98,6 +112,8 @@ export function createStreaks({ prs, reduced, scene, camera, view, uniforms, can
       uDpr: uniforms.uDpr,
       uMaxPoint: uniforms.uMaxPoint,
       uLight: uniforms.uLight,
+      uColumn: uniforms.uColumn,
+      uDim: dim,
       uColor: { value: new THREE.Vector3().fromArray(GOLD.head) },
       uAlpha: { value: 0 },
     },
@@ -113,7 +129,7 @@ export function createStreaks({ prs, reduced, scene, camera, view, uniforms, can
   head.renderOrder = 2;
 
   const tailMat = new THREE.ShaderMaterial({
-    uniforms: { uColor: { value: new THREE.Vector3().fromArray(GOLD.tail) }, uAlpha: { value: 0 } },
+    uniforms: { uColor: { value: new THREE.Vector3().fromArray(GOLD.tail) }, uAlpha: { value: 0 }, uColumn: uniforms.uColumn, uDim: dim },
     vertexShader: tailVertex,
     fragmentShader: tailFragment,
     transparent: true,
@@ -196,7 +212,10 @@ export function createStreaks({ prs, reduced, scene, camera, view, uniforms, can
     if (on === catching) return;
     catching = on;
     root.classList.toggle('is-catching', on);
-    if (current?.tween && !current.focused) gsap.to(current.tween, { timeScale: on ? 0.25 : 1, duration: 0.35, ease: 'power2.out', overwrite: true });
+    if (current?.tween && !current.focused) {
+      gsap.to(current.tween, { timeScale: on ? 0.25 : 1, duration: 0.35, ease: 'power2.out', overwrite: true });
+      gsap.to(lift, { v: on ? 1 : 0, duration: 0.35, ease: 'power2.out', overwrite: true });
+    }
   }
 
   function finish(reschedule = true) {
@@ -207,6 +226,8 @@ export function createStreaks({ prs, reduced, scene, camera, view, uniforms, can
     current = null;
     group.visible = false;
     setCatching(false);
+    gsap.killTweensOf(lift);
+    lift.v = 0;
     if (reschedule) schedule();
   }
 
@@ -246,9 +267,11 @@ export function createStreaks({ prs, reduced, scene, camera, view, uniforms, can
       lastPointer = { x, y, target };
       setCatching(!!current && !current.focused && !blocked(target) && hit(x, y));
     },
-    // place the streak for this frame and refresh its projected head for hit testing
-    frame() {
+    // place the streak for this frame and refresh its projected head for hit testing. amount is the text
+    // mode dim at the middle of the column
+    frame(amount = 0) {
       if (!current) return;
+      dim.value = amount * (1 - lift.v);
       const { state, start, end } = current;
       const p = state.p;
       tmp.copy(start).lerp(end, p);
@@ -287,6 +310,7 @@ export function createStreaks({ prs, reduced, scene, camera, view, uniforms, can
       current.focused = true;
       const c = current;
       gsap.to(c.state, { hold: 1, duration: reduced.matches ? 0 : 0.4, ease: 'power2.out', overwrite: 'auto' });
+      gsap.to(lift, { v: 1, duration: reduced.matches ? 0 : 0.4, ease: 'power2.out', overwrite: true });
       if (reduced.matches) {
         c.tween.timeScale(0);
         done?.();
@@ -300,6 +324,7 @@ export function createStreaks({ prs, reduced, scene, camera, view, uniforms, can
       const c = current;
       c.focused = false;
       gsap.to(c.state, { hold: 0, duration: reduced.matches ? 0 : 0.8, ease: 'power2.inOut', overwrite: 'auto' });
+      gsap.to(lift, { v: catching ? 1 : 0, duration: reduced.matches ? 0 : 0.8, ease: 'power2.inOut', overwrite: true });
       if (reduced.matches) c.tween.timeScale(1);
       else gsap.to(c.tween, { timeScale: 1, duration: 0.6, ease: 'power2.in', overwrite: true });
     },
@@ -319,7 +344,7 @@ export function createStreaks({ prs, reduced, scene, camera, view, uniforms, can
     debug() {
       if (!current) return null;
       const h = current.start.clone().lerp(current.end, current.state.p);
-      return { index: current.index, url: current.pr.url, p: current.state.p, timeScale: current.tween.timeScale(), focused: current.focused, hold: current.state.hold, head: { x: h.x, y: h.y, z: h.z }, screen: { ...current.screen } };
+      return { index: current.index, url: current.pr.url, p: current.state.p, timeScale: current.tween.timeScale(), focused: current.focused, hold: current.state.hold, dim: dim.value, lift: lift.v, head: { x: h.x, y: h.y, z: h.z }, screen: { ...current.screen } };
     },
     dispose() {
       clearTimeout(timer);
@@ -328,6 +353,7 @@ export function createStreaks({ prs, reduced, scene, camera, view, uniforms, can
         current.tween.kill();
       }
       setCatching(false);
+      gsap.killTweensOf(lift);
       document.removeEventListener('click', onClick, true);
       document.removeEventListener('visibilitychange', onVisibility);
       scene.remove(group);

@@ -190,6 +190,10 @@ export function createMode({ scene, reduced }) {
   rocket.hidden = false;
 
   return {
+    // stars mode, a peek or a launch owns the page
+    get busy() {
+      return active || peeking || launch !== null;
+    },
     dispose() {
       launch?.progress(1);
       if (scene.prOpen) scene.closeCard();

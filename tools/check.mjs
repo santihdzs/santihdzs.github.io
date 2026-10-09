@@ -1,7 +1,7 @@
 // dev only browser checks. starts its own server, drives chromium, prints pass/fail.
 // usage: node tools/check.mjs [section ...]
 // sections: static load mobile interact reduced robust perf contrast align pick overscroll chain browse narrow cardlayout rocket texture accent satellite
-//           cards prs exits blend nebcolor starscontrast breakpoint fixes serve print live
+//           cards prs exits blend nebcolor starscontrast breakpoint fixes dim readout keys serve print live
 // live calls the real now playing worker, so it only runs when named or with CHECK_LIVE=1. every other run answers
 // the worker's url with a local idle reply and never reaches it.
 import { chromium } from 'playwright';
@@ -3310,6 +3310,752 @@ async function printChecks(gpu) {
   }
 }
 
+// waits n animation frames in the page
+const frames = (page, n = 3) =>
+  page.evaluate((count) => new Promise((res) => {
+    let k = 0;
+    const f = () => (++k >= count ? res() : requestAnimationFrame(f));
+    requestAnimationFrame(f);
+  }), n);
+
+// records state every animation frame while an action runs: the dim, the scroll and the readout
+function track(page, ms) {
+  return page.evaluate(
+    (dur) =>
+      new Promise((res) => {
+        const out = [];
+        const t0 = performance.now();
+        const f = () => {
+          const s = window.__starfield.state();
+          const streak = window.__starfield.streak();
+          out.push({ t: performance.now() - t0, dim: s.dim, nebula: s.nebula, y: window.scrollY, readout: document.querySelector('.readout').textContent, streakDim: streak ? streak.dim : null });
+          if (performance.now() - t0 < dur) requestAnimationFrame(f);
+          else res(out);
+        };
+        requestAnimationFrame(f);
+      }),
+    ms
+  );
+}
+
+// largest change of a value between consecutive frames, per 16.7ms of frame time, so one long frame reads as
+// what it is and a snap still stands out
+const largestStep = (list, pick) =>
+  list.slice(1).reduce((m, f, i) => Math.max(m, (Math.abs(pick(f) - pick(list[i])) * 16.7) / Math.max(f.t - list[i].t, 16.7)), 0);
+
+// the field with the page hidden, summed into vertical strips of light above the background. under reduced
+// motion the field renders only on change, so hiding the page leaves it exactly as it was
+const STRIPS = 48;
+async function fieldStrips(page, gpu) {
+  await page.addStyleTag({ content: 'main, .site-footer, .topbar, .orbit, .stars-ui, .skip, .card, .card-tether, .focus-pulse, .star-ring { visibility: hidden !important }' });
+  await sleep(150);
+  const png = await page.screenshot();
+  await page.evaluate(() => document.querySelector('style:last-of-type').remove());
+  const probe = await gpu.newPage();
+  const strips = await probe.evaluate(
+    async ({ src, n }) => {
+      const img = new Image();
+      img.src = src;
+      await img.decode();
+      const c = document.createElement('canvas');
+      c.width = img.width;
+      c.height = img.height;
+      const g = c.getContext('2d');
+      g.drawImage(img, 0, 0);
+      const d = g.getImageData(0, 0, c.width, c.height).data;
+      const out = new Array(n).fill(0);
+      for (let i = 0; i < d.length; i += 4) {
+        const x = (i / 4) % c.width;
+        out[Math.min(n - 1, Math.floor((x / c.width) * n))] += Math.max(0, d[i] - 6) + Math.max(0, d[i + 1] - 8) + Math.max(0, d[i + 2] - 11);
+      }
+      return out;
+    },
+    { src: `data:image/png;base64,${png.toString('base64')}`, n: STRIPS }
+  );
+  await probe.close();
+  return strips;
+}
+
+const sum = (a, from, to) => a.slice(from, to).reduce((s, v) => s + v, 0);
+// light in the outer edge strips (beyond the column's feather) and in the middle third
+const edges = (a) => sum(a, 0, 3) + sum(a, STRIPS - 3, STRIPS);
+const middle = (a) => sum(a, STRIPS / 3, (2 * STRIPS) / 3);
+
+// where the about section's top edge sits, and the dim the ramp asks for there
+const rampAt = (page) =>
+  page.evaluate(() => {
+    const top = document.querySelector('main .section').getBoundingClientRect().top / innerHeight;
+    const t = Math.min(1, Math.max(0, (top - 0.85) / (0.3 - 0.85)));
+    return t * t * (3 - 2 * t);
+  });
+
+const aboutY = (page) => page.evaluate(() => Math.round(document.querySelector('main .section').getBoundingClientRect().top + scrollY));
+
+// item 1: text mode dims the field and the streaks a little behind the content column, only below the hero
+async function dimChecks(gpu) {
+  // pixels: a still field, measured with and without the dim at the same scroll position
+  {
+    const { page, context, logs } = await open(gpu, `${ORIGIN}/?debug`, { width: 1440, height: 900, dsf: 1, reduced: true });
+    await sceneReady(page);
+    await sleep(800);
+    let s = await state(page);
+    const top = await fieldStrips(page, gpu);
+    await page.evaluate(() => window.__starfield.forceDim(0));
+    await frames(page);
+    const topBase = await fieldStrips(page, gpu);
+    await page.evaluate(() => window.__starfield.forceDim(null));
+    await frames(page);
+    const topDiff = top.reduce((m, v, i) => Math.max(m, Math.abs(v - topBase[i]) / Math.max(1, topBase[i])), 0);
+    check('dim: at the top of the page the field is exactly its undimmed self', s.dim === 0 && topDiff < 0.002, `dim ${s.dim}, largest strip difference ${(topDiff * 100).toFixed(3)}%`);
+
+    const about = await aboutY(page);
+    await page.evaluate((y) => window.scrollTo(0, y), about);
+    await frames(page);
+    s = await state(page);
+    const lit = await fieldStrips(page, gpu);
+    await page.evaluate(() => window.__starfield.forceDim(0));
+    await frames(page);
+    const base = await fieldStrips(page, gpu);
+    await page.evaluate(() => window.__starfield.forceDim(null));
+    await frames(page);
+    const mid = middle(lit) / middle(base);
+    const edge = edges(lit) / edges(base);
+    const want = 1 - s.column.field;
+    check('dim: with about in view the middle third loses about the configured amount and the edges keep theirs', near(mid, want, 0.04) && near(edge, 1, 0.015) && s.dim === 1, `middle ${mid.toFixed(3)} (want ${want.toFixed(2)}), edges ${edge.toFixed(3)}, column ${s.column.left.toFixed(3)} to ${s.column.right.toFixed(3)}, feather ${s.column.feather}`);
+    // the profile, strip by strip: full over the column, easing out across the feather, nothing at the sides
+    const ratios = lit.map((v, i) => (base[i] > 2000 ? v / base[i] : null));
+    const inner = ratios.filter((r, i) => r !== null && (i + 0.5) / STRIPS > s.column.left + s.column.feather / 2 && (i + 0.5) / STRIPS < s.column.right - s.column.feather / 2);
+    const outer = ratios.filter((r, i) => r !== null && ((i + 1) / STRIPS < s.column.left - s.column.feather / 2 || i / STRIPS > s.column.right + s.column.feather / 2));
+    check('dim: strip by strip the field is evenly dim over the column and untouched past its feather', inner.length > 20 && inner.every((r) => near(r, want, 0.06)) && outer.every((r) => near(r, 1, 0.02)), `column strips ${Math.min(...inner).toFixed(3)} to ${Math.max(...inner).toFixed(3)}, outer strips ${outer.map((r) => r.toFixed(3)).join(' ')}`);
+
+    // reduced motion: no temporal ease, still scroll linked
+    await page.evaluate(() => window.scrollTo(0, 0));
+    await frames(page);
+    const seen = [];
+    let off = 0;
+    for (let y = 0; y <= about; y += 30) {
+      await page.evaluate((v) => window.scrollTo(0, v), y);
+      await frames(page, 2);
+      const d = (await state(page)).dim;
+      off = Math.max(off, Math.abs(d - (await rampAt(page))));
+      seen.push(d);
+    }
+    const between = seen.filter((d) => d > 0.02 && d < 0.98).length;
+    const monotonic = seen.every((d, i) => i === 0 || d >= seen[i - 1] - 1e-9);
+    check('dim, reduced motion: follows the scroll position at once, no easing, and rises monotonically', off < 1e-6 && monotonic && between >= 5 && seen[0] === 0 && seen.at(-1) === 1, `${seen.length} positions, ${between} in between, largest gap from the ramp ${off.toExponential(1)}`);
+
+    // stars mode looks the same whatever the page's scroll was when it began
+    await page.evaluate(() => window.scrollTo(0, 0));
+    await frames(page);
+    await page.click('.mode-toggle');
+    await sleep(400);
+    const fromTop = await fieldStrips(page, gpu);
+    await page.keyboard.press('Escape');
+    await sleep(400);
+    await page.evaluate((y) => window.scrollTo(0, y), about);
+    await frames(page);
+    await page.evaluate(() => document.activeElement?.blur());
+    await page.click('.mode-toggle');
+    await sleep(400);
+    s = await state(page);
+    const fromAbout = await fieldStrips(page, gpu);
+    const starsDiff = fromTop.reduce((m, v, i) => Math.max(m, Math.abs(v - fromAbout[i]) / Math.max(1, fromTop[i])), 0);
+    check('dim: stars mode is pixel identical whether it began at the top or with about in view', s.dim === 0 && starsDiff < 0.002, `dim ${s.dim}, largest strip difference ${(starsDiff * 100).toFixed(3)}%`);
+    check('dim pixel checks left the console clean', !logs.length, logs.join(' | '));
+    await context.close();
+  }
+
+  // motion: the ramp, jumps, and every way into and out of stars mode from a scrolled page
+  {
+    const { page, context, logs } = await open(gpu, `${ORIGIN}/?debug`, { width: 1440, height: 900, dsf: 1 });
+    await sceneReady(page);
+    await page.mouse.move(720, 450);
+    await sleep(1500);
+    const about = await aboutY(page);
+    const slow = await page.evaluate(
+      (end) =>
+        new Promise((res) => {
+          const out = [];
+          let y = 0;
+          const f = () => {
+            window.scrollTo(0, y);
+            out.push(window.__starfield.state().dim);
+            y += 6;
+            if (y <= end) requestAnimationFrame(f);
+            else res(out);
+          };
+          requestAnimationFrame(f);
+        }),
+      about
+    );
+    await sleep(1600);
+    const settledDim = (await state(page)).dim;
+    const rises = slow.every((d, i) => i === 0 || d >= slow[i - 1] - 1e-9);
+    const slowStep = slow.slice(1).reduce((m, d, i) => Math.max(m, d - slow[i]), 0);
+    check('dim: a slow scroll ramps it monotonically with no step between frames, settling at 1', slow[0] === 0 && rises && slowStep < 0.03 && settledDim === 1, `${slow.length} frames, largest step ${slowStep.toFixed(4)}, settled ${settledDim}`);
+
+    let rec = track(page, 2600);
+    await sleep(30);
+    await page.evaluate(() => window.scrollTo({ top: 0, behavior: 'instant' }));
+    let f = await rec;
+    check('dim: an instant jump back to the top eases it out instead of snapping', largestStep(f, (x) => x.dim) < 0.08 && f.at(-1).dim === 0, `largest step ${largestStep(f, (x) => x.dim).toFixed(3)}, end ${f.at(-1).dim}`);
+
+    // into stars mode from about, and back out
+    await page.evaluate((y) => window.scrollTo({ top: y, behavior: 'instant' }), about);
+    await sleep(1600);
+    rec = track(page, 3200);
+    await sleep(30);
+    await page.click('.mode-toggle');
+    f = await rec;
+    check('dim: entering stars mode from a scrolled page fades it out with the mode, ending at exactly 0', f[0].dim > 0.99 && largestStep(f, (x) => x.dim) < 0.08 && f.at(-1).dim === 0, `largest step ${largestStep(f, (x) => x.dim).toFixed(3)}, end ${f.at(-1).dim}`);
+    rec = track(page, 1800);
+    await sleep(30);
+    await page.keyboard.press('Escape');
+    f = await rec;
+    check('dim: leaving stars mode lands at the top with no dim popping in', Math.max(...f.map((x) => x.dim)) < 0.01 && f.at(-1).y === 0, `largest dim ${Math.max(...f.map((x) => x.dim)).toFixed(4)}`);
+
+    // the rocket from the footer
+    await page.evaluate(() => window.scrollTo({ top: document.scrollingElement.scrollHeight, behavior: 'instant' }));
+    await sleep(1600);
+    rec = track(page, 3000);
+    await sleep(30);
+    await page.click('.rocket');
+    f = await rec;
+    check('dim: the rocket launch eases it out with the scroll, no jump', f[0].dim > 0.99 && largestStep(f, (x) => x.dim) < 0.08 && f.at(-1).dim < 0.001, `largest step ${largestStep(f, (x) => x.dim).toFixed(3)}, end ${f.at(-1).dim.toFixed(4)}`);
+    await page.click('.mode-toggle');
+    await sleep(1500);
+
+    // overscroll exit after stars mode began with about in view
+    await page.evaluate((y) => window.scrollTo({ top: y, behavior: 'instant' }), about);
+    await sleep(1600);
+    await page.evaluate(() => document.activeElement?.blur());
+    await page.click('.mode-toggle');
+    await sleep(1000);
+    await page.mouse.move(720, 450);
+    await wheelAt(page, 160, 6, 30);
+    await sleep(800);
+    await wheelAt(page, -160, 8, 30);
+    await sleep(1500);
+    rec = track(page, 2200);
+    await sleep(30);
+    await page.mouse.wheel(0, -90);
+    await sleep(120);
+    await page.mouse.wheel(0, -90);
+    await sleep(120);
+    await wheelAt(page, -100, 2, 60);
+    f = await rec;
+    const exited = !(await page.evaluate(() => document.documentElement.classList.contains('is-stars')));
+    check('dim: the overscroll exit returns to the top with no dim popping in', exited && Math.max(...f.map((x) => x.dim)) < 0.01, `exited ${exited}, largest dim ${Math.max(...f.map((x) => x.dim)).toFixed(4)}`);
+
+    // streaks: their own strength, lifted by hover and by an open card, gone in a peek
+    await page.evaluate((y) => window.scrollTo({ top: y, behavior: 'instant' }), about);
+    await sleep(1800);
+    const sk = await catchableStreak(page);
+    if (sk) {
+      const free = await page.evaluate(() => ({ s: window.__starfield.state(), k: window.__starfield.streak() }));
+      check('dim: a free streak carries its own strength, the same scroll amount and the shared column', near(free.k.dim, free.s.dim * free.s.column.streak, 0.01) && free.s.column.streak > free.s.column.field, `streak ${free.k.dim.toFixed(3)} for dim ${free.s.dim.toFixed(3)} x ${free.s.column.streak}`);
+      const at = await page.evaluate(() => window.__starfield.streak().screen);
+      await page.mouse.move(at.x, at.y);
+      await sleep(550);
+      const hovered = await page.evaluate(() => window.__starfield.streak());
+      check('dim: a streak under the pointer is back at full brightness', hovered && hovered.timeScale < 0.5 && hovered.dim < 0.01, hovered ? `dim ${hovered.dim.toFixed(4)}, lift ${hovered.lift.toFixed(3)}, speed ${hovered.timeScale.toFixed(2)}` : 'streak gone');
+      rec = track(page, 2000);
+      await sleep(30);
+      const head = await page.evaluate(() => window.__starfield.streak()?.screen);
+      if (head) await page.mouse.click(head.x, head.y);
+      f = await rec;
+      await sleep(600);
+      const peek = await page.evaluate(() => ({ s: window.__starfield.state(), k: window.__starfield.streak(), peek: document.documentElement.classList.contains('is-peek') }));
+      check('dim: a peek from a scrolled page fades it out smoothly; the paused streak under its card is at full brightness', peek.peek && peek.s.dim === 0 && peek.k.focused && peek.k.dim === 0 && largestStep(f, (x) => x.dim) < 0.08, `dim ${peek.s.dim}, streak ${peek.k.dim}, largest step ${largestStep(f, (x) => x.dim).toFixed(3)}`);
+      rec = track(page, 2600);
+      await sleep(30);
+      await page.keyboard.press('Escape');
+      f = await rec;
+      check('dim: closing the peek brings it back with the page, no pop', largestStep(f, (x) => x.dim) < 0.08 && f.at(-1).dim > 0.97, `largest step ${largestStep(f, (x) => x.dim).toFixed(3)}, end ${f.at(-1).dim.toFixed(3)}`);
+    } else check('dim: streak checks (no catchable streak)', false);
+    check('dim motion checks left the console clean', !logs.length, logs.join(' | '));
+    await context.close();
+  }
+}
+
+const MONTH_NAMES = ['jan', 'feb', 'mar', 'apr', 'may', 'jun', 'jul', 'aug', 'sep', 'oct', 'nov', 'dec'];
+const monthIndex = (text) => {
+  const m = String(text).trim().match(/([a-z]{3}) (\d{4})$/);
+  return m ? Number(m[2]) * 12 + MONTH_NAMES.indexOf(m[1]) : NaN;
+};
+const cardDate = (page) => page.evaluate(() => document.querySelector('.card [data-f="date"]').textContent);
+const readoutText = (page) => page.evaluate(() => document.querySelector('.readout').textContent);
+const readoutOpacity = (page) => page.evaluate(() => Number(getComputedStyle(document.querySelector('.readout')).opacity));
+
+// the sharpest star a click can reach right now, what a visitor would pick
+const sharpestStar = (page) =>
+  page.evaluate(() => {
+    const f = window.__starfield;
+    const seen = new Set();
+    for (let y = 160; y < innerHeight - 160; y += 9) for (let x = 200; x < innerWidth - 200; x += 9) {
+      const i = f.pickAt(x, y, -1);
+      if (i >= 0) seen.add(i);
+    }
+    let best = null;
+    for (const i of seen) {
+      const p = f.project(i);
+      if (!best || p.coc < best.coc) best = { i, x: p.x, y: p.y, coc: p.coc };
+    }
+    return best;
+  });
+
+// a flight's readout: the month by frame, never turning back, landing on the card's month
+function flightOk(seq, card) {
+  const months = seq.map(monthIndex);
+  const diffs = months.slice(1).map((m, i) => m - months[i]);
+  const oneWay = diffs.every((d) => d >= 0) || diffs.every((d) => d <= 0);
+  return { oneWay, lands: months.at(-1) === monthIndex(card), changes: diffs.filter((d) => d !== 0).length };
+}
+
+// item 2: the readout names the focused commit's month, morphs to it during the flight, and steps aside for streaks
+async function readoutChecks(gpu) {
+  // every commit, reduced motion: flights are instant and land where a moving flight lands
+  {
+    const { page, context, logs } = await open(gpu, `${ORIGIN}/?debug`, { width: 1440, height: 900, reduced: true });
+    await sceneReady(page);
+    await page.click('.mode-toggle');
+    await sleep(300);
+    const newest = await page.evaluate(async () => {
+      const raw = await fetch('./data/commits.json').then((r) => r.json());
+      const ts = Math.max(...raw.commits.map((c) => Number(c[2])));
+      const d = new Date(ts * 1000);
+      return `${['jan', 'feb', 'mar', 'apr', 'may', 'jun', 'jul', 'aug', 'sep', 'oct', 'nov', 'dec'][d.getMonth()]} ${d.getFullYear()}`;
+    });
+    const home = await readoutText(page);
+    check('readout: home reads the newest commit\'s month', home === newest, `${home}, newest ${newest}`);
+    await page.click('.browse');
+    await frames(page);
+    const n = await page.evaluate(() => window.__starfield.layout.n);
+    const off = [];
+    const seenIdx = new Set();
+    for (let k = 0; k < n; k++) {
+      const r = await page.evaluate(() => ({ focus: window.__starfield.state().focus, card: document.querySelector('.card [data-f="date"]').textContent, readout: document.querySelector('.readout').textContent }));
+      seenIdx.add(r.focus);
+      if (!r.card.endsWith(` ${r.readout}`)) off.push(`#${r.focus} ${r.card} vs ${r.readout}`);
+      await page.keyboard.press('ArrowLeft');
+      await frames(page, 2);
+    }
+    check('readout: every focused commit reads exactly its card\'s month (reduced motion, all commits)', !off.length && seenIdx.size === n, `${n - off.length}/${n} match${off.length ? `; ${off.slice(0, 4).join('; ')}` : ''}`);
+    check('readout sweep left the console clean', !logs.length, logs.join(' | '));
+    await context.close();
+  }
+
+  // real clicks with motion across the whole tunnel
+  {
+    const { page, context, logs } = await open(gpu, `${ORIGIN}/?debug`, { width: 1440, height: 900 });
+    await sceneReady(page);
+    await page.click('.mode-toggle');
+    await sleep(1200);
+    await page.mouse.move(720, 880);
+    const n = await page.evaluate(() => window.__starfield.layout.n);
+    const depth = await page.evaluate(() => window.__starfield.layout.depth);
+    const samples = [];
+    const fly = async (go, tag) => {
+      const before = await readoutText(page);
+      const rec = track(page, 1700);
+      await sleep(30);
+      await go();
+      const seq = (await rec).map((x) => x.readout);
+      await sleep(200);
+      const card = await cardDate(page);
+      const focus = (await state(page)).focus;
+      samples.push({ tag, focus, card, readout: await readoutText(page), before, ...flightOk(seq, card) });
+      await page.keyboard.press('Escape');
+      await sleep(1500);
+      samples.at(-1).restored = (await readoutText(page)) === before;
+    };
+    await fly(() => page.click('.browse'), 'browse');
+    for (const frac of [0.04, 0.1, 0.18, 0.27, 0.36, 0.45, 0.55, 0.65, 0.75, 0.85, 1]) {
+      await page.evaluate(() => document.activeElement?.blur());
+      await page.keyboard.press('Home');
+      await sleep(900);
+      const steps = Math.round((frac * depth) / Math.max(0.6, depth / 30));
+      for (let k = 0; k < steps; k++) await page.keyboard.press('ArrowDown');
+      await sleep(2200);
+      let star = await sharpestStar(page);
+      if (frac === 1) {
+        const last = await page.evaluate((i) => {
+          const p = window.__starfield.project(i);
+          return window.__starfield.pickAt(p.x, p.y, -1) === i ? { i, x: p.x, y: p.y } : null;
+        }, n - 1);
+        star = last ?? star;
+      }
+      if (!star) continue;
+      await fly(() => page.mouse.click(star.x, star.y), `depth ${frac}`);
+      await page.mouse.move(720, 880);
+    }
+    const idx = new Set(samples.map((s) => s.focus));
+    const bad = samples.filter((s) => !s.card.endsWith(` ${s.readout}`));
+    check('readout: a dozen clicked commits, newest and oldest included, each read their card\'s month after the flight', samples.length >= 12 && !bad.length && idx.has(0) && idx.has(n - 1), `${samples.length} samples: ${samples.map((s) => `#${s.focus} ${s.readout}`).join(', ')}${bad.length ? `; off: ${bad.map((s) => `#${s.focus} ${s.card} vs ${s.readout}`).join('; ')}` : ''}`);
+    const turned = samples.filter((s) => !s.oneWay || !s.lands);
+    check('readout: during every flight the month moves one way only and lands on the card', !turned.length, `${samples.map((s) => s.changes).join(',')} month changes per flight${turned.length ? `; turned: ${turned.map((s) => s.tag).join(', ')}` : ''}`);
+    const lost = samples.filter((s) => !s.restored);
+    check('readout: escape brings back the month from before the flight', !lost.length, lost.map((s) => s.tag).join(', '));
+
+    // the other ways out: a click on empty field, the close button, the toggle, and an overscroll pull by touch
+    const travelTo = async (frac) => {
+      await page.evaluate(() => document.activeElement?.blur());
+      await page.keyboard.press('Home');
+      await sleep(900);
+      for (let k = 0; k < Math.round((frac * depth) / Math.max(0.6, depth / 30)); k++) await page.keyboard.press('ArrowDown');
+      await sleep(2200);
+    };
+    await travelTo(0.3);
+    let before = await readoutText(page);
+    let star = await sharpestStar(page);
+    await page.mouse.click(star.x, star.y);
+    await sleep(1700);
+    const spot = await emptySpot(page);
+    await page.mouse.click(spot.x, spot.y);
+    await sleep(1600);
+    check('readout: a click on empty field closes the card and restores the month', (await state(page)).focus === -1 && (await readoutText(page)) === before, `${before} -> ${await readoutText(page)}`);
+    star = await sharpestStar(page);
+    await page.mouse.click(star.x, star.y);
+    await sleep(1700);
+    await page.click('.card-close');
+    await sleep(1600);
+    check('readout: the close button restores the month', (await readoutText(page)) === before, `${before} -> ${await readoutText(page)}`);
+    await page.evaluate(() => document.activeElement?.blur());
+    await page.keyboard.press('Home');
+    await sleep(2500);
+    before = await readoutText(page);
+    star = await sharpestStar(page);
+    await page.mouse.click(star.x, star.y);
+    await sleep(1700);
+    await page.click('.mode-toggle');
+    await sleep(1600);
+    await page.click('.mode-toggle');
+    await sleep(1400);
+    check('readout: the toggle closes the card with the mode, and stars mode comes back reading the month from before', (await readoutText(page)) === before, `${before} -> ${await readoutText(page)}`);
+    // arm the exit, then open a card at home and pull past the newest end by touch
+    await page.mouse.move(720, 450);
+    await wheelAt(page, 160, 6, 30);
+    await sleep(800);
+    await wheelAt(page, -160, 8, 30);
+    await sleep(1800);
+    before = await readoutText(page);
+    await page.mouse.move(720, 880);
+    star = await sharpestStar(page);
+    await page.mouse.click(star.x, star.y);
+    await sleep(1700);
+    const pulled = await page.evaluate(() => {
+      const c = document.querySelector('canvas.starfield');
+      const at = (y) => ({ pointerId: 7, pointerType: 'touch', isPrimary: true, clientX: 720, clientY: y, bubbles: true });
+      c.dispatchEvent(new PointerEvent('pointerdown', at(300)));
+      for (let y = 312; y <= 600; y += 12) window.dispatchEvent(new PointerEvent('pointermove', at(y)));
+      window.dispatchEvent(new PointerEvent('pointerup', at(600)));
+      return !document.documentElement.classList.contains('is-stars');
+    });
+    await sleep(1600);
+    await page.click('.mode-toggle');
+    await sleep(1400);
+    check('readout: an overscroll exit with a card open, then stars mode again, reads the month from before', pulled && (await readoutText(page)) === before, `exited ${pulled}, ${before} -> ${await readoutText(page)}`);
+
+    // pull request cards: the readout fades out with the stars ui's timing and returns with its month
+    const sk = await catchableStreak(page);
+    if (sk) {
+      before = await readoutText(page);
+      const head = await page.evaluate(() => window.__starfield.streak().screen);
+      await page.mouse.click(head.x, head.y);
+      await sleep(200);
+      const mid = await readoutOpacity(page);
+      await sleep(1600);
+      const gone = await readoutOpacity(page);
+      const held = await readoutText(page);
+      await page.keyboard.press('Escape');
+      await sleep(250);
+      const midBack = await readoutOpacity(page);
+      await sleep(1500);
+      const back = await readoutOpacity(page);
+      check('readout: a pull request card in stars mode fades it out and back in, never a snap', mid > 0.05 && mid < 0.95 && gone === 0 && midBack > 0.05 && midBack < 0.95 && back === 1 && held === before && (await readoutText(page)) === before, `opacity ${mid.toFixed(2)} -> ${gone} -> ${midBack.toFixed(2)} -> ${back}, ${before} held`);
+    } else check('readout: pull request card in stars mode (no catchable streak)', false);
+    await page.click('.mode-toggle');
+    await sleep(1500);
+    const tk = await catchableStreak(page);
+    if (tk) {
+      const head = await page.evaluate(() => window.__starfield.streak().screen);
+      await page.mouse.click(head.x, head.y);
+      await sleep(1700);
+      const during = await page.evaluate(() => ({ faded: document.querySelector('.readout').classList.contains('is-faded'), ui: getComputedStyle(document.querySelector('.stars-ui')).visibility, peek: document.documentElement.classList.contains('is-peek') }));
+      await page.keyboard.press('Escape');
+      await sleep(1600);
+      await page.click('.mode-toggle');
+      await sleep(1400);
+      const after = await readoutOpacity(page);
+      check('readout: hidden through a peek from the page, back when stars mode comes', during.peek && during.faded && during.ui === 'hidden' && after === 1, `${JSON.stringify(during)}, opacity after ${after}`);
+    } else check('readout: peek from the page (no catchable streak)', false);
+    check('readout motion checks left the console clean', !logs.length, logs.join(' | '));
+    await context.close();
+  }
+}
+
+// the sections by the numbers in their labels, with where a number key should land each one
+const sectionsByNumber = (page) =>
+  page.evaluate(() =>
+    [...document.querySelectorAll('main .section')].map((s) => {
+      const box = getComputedStyle(s);
+      const label = s.querySelector('.rail');
+      return {
+        id: s.id,
+        n: Number.parseInt(s.querySelector('.rail-n').textContent, 10),
+        // the content box top in the viewport, which the label rests on, and where it should rest
+        top: s.getBoundingClientRect().top + Number.parseFloat(box.borderTopWidth) + Number.parseFloat(box.paddingTop),
+        margin: Number.parseFloat(getComputedStyle(label).scrollMarginTop),
+      };
+    })
+  );
+
+async function scrollSettled(page) {
+  let last = -1;
+  let same = 0;
+  for (let k = 0; k < 60 && same < 4; k++) {
+    await sleep(80);
+    const y = await page.evaluate(() => window.scrollY);
+    same = y === last ? same + 1 : 0;
+    last = y;
+  }
+  return last;
+}
+
+const view = (page) => page.evaluate(() => ({ y: window.scrollY, max: document.scrollingElement.scrollHeight - innerHeight, active: document.activeElement?.id || document.activeElement?.className || document.activeElement?.tagName }));
+const revealedIn = (page, id) =>
+  page.evaluate((sid) => [...document.querySelectorAll(`#${sid} [data-reveal], #${sid} [data-reveal-group] > *`)].every((el) => getComputedStyle(el).opacity === '1'), id);
+const synthKey = (page, init) => page.evaluate((i) => (document.activeElement ?? document.body).dispatchEvent(new KeyboardEvent('keydown', { bubbles: true, cancelable: true, ...i })), init);
+
+// item 3: number keys jump to the top and the sections in text mode
+async function keysChecks(gpu) {
+  {
+    const { page, context, logs } = await open(gpu, `${ORIGIN}/?debug&spotify=mock`, { width: 1440, height: 900 });
+    await sceneReady(page);
+    await page.mouse.move(720, 880);
+    await sleep(1600);
+    const list = await sectionsByNumber(page);
+    check('keys: five sections numbered 1 to 5 in their labels', list.map((s) => s.n).join() === '1,2,3,4,5', list.map((s) => `${s.n} #${s.id}`).join(', '));
+    for (const sec of list) {
+      await page.evaluate(() => window.scrollTo({ top: 0, behavior: 'instant' }));
+      await page.evaluate(() => document.activeElement?.blur());
+      await sleep(500);
+      await page.keyboard.press(String(sec.n));
+      await scrollSettled(page);
+      await sleep(900);
+      const now = (await sectionsByNumber(page)).find((s) => s.id === sec.id);
+      const v = await view(page);
+      const atBottom = Math.abs(v.y - v.max) <= 1;
+      const landed = near(now.top, now.margin, 2) || (atBottom && now.top >= now.margin - 2 && now.top < 900);
+      check(`keys: ${sec.n} brings #${sec.id} to the top under the bar, focused and revealed`, landed && v.active === sec.id && (await revealedIn(page, sec.id)), `label at ${now.top.toFixed(1)}px (wants ${now.margin}px${atBottom ? ', clamped at the end' : ''}), focus ${v.active}`);
+    }
+    const ring = await page.evaluate(() => getComputedStyle(document.activeElement).outlineStyle);
+    check('keys: a focused section shows no outline', ring === 'none', ring);
+    // tab carries on from the section
+    await page.keyboard.press('Tab');
+    const next = await page.evaluate(() => document.activeElement.closest('.section')?.id ?? document.activeElement.tagName);
+    check('keys: tab continues from the section that took focus', next === list.at(-1).id, next);
+
+    // 0: back to the very top, focus on the page, and the field at hero brightness again
+    await page.evaluate(() => document.activeElement?.blur());
+    let rec = track(page, 3200);
+    await sleep(30);
+    await page.keyboard.press('0');
+    let f = await rec;
+    let v = await view(page);
+    let s = await state(page);
+    const falls = f.every((x, i) => i === 0 || x.dim <= f[i - 1].dim + 1e-9);
+    check('keys: 0 returns to the top and focuses the page; the dim eases back out to exactly 0', v.y === 0 && v.active === 'main' && falls && largestStep(f, (x) => x.dim) < 0.08 && s.dim === 0, `scroll ${v.y}, focus ${v.active}, largest dim step ${largestStep(f, (x) => x.dim).toFixed(3)}, end ${s.dim}`);
+    // the dim rises along a jump down, no snap
+    await page.evaluate(() => document.activeElement?.blur());
+    rec = track(page, 2600);
+    await sleep(30);
+    await page.keyboard.press('3');
+    f = await rec;
+    const rises = f.every((x, i) => i === 0 || x.dim >= f[i - 1].dim - 1e-9);
+    check('keys: the dim follows a jump down smoothly to 1', rises && largestStep(f, (x) => x.dim) < 0.08 && f.at(-1).dim === 1, `largest step ${largestStep(f, (x) => x.dim).toFixed(3)}, end ${f.at(-1).dim}`);
+    // the place already at the top: nothing moves
+    await scrollSettled(page);
+    const here = await view(page);
+    await page.keyboard.press('3');
+    await sleep(600);
+    const still = await view(page);
+    await page.evaluate(() => window.scrollTo({ top: 0, behavior: 'instant' }));
+    await sleep(300);
+    await page.keyboard.press('0');
+    await sleep(600);
+    check('keys: the key for the place already at the top moves nothing, 0 at the top included', still.y === here.y && (await view(page)).y === 0, `${here.y} -> ${still.y}`);
+
+    // retargeting: 5 then 2 while the first scroll runs
+    await page.evaluate(() => document.activeElement?.blur());
+    const path = page.evaluate(
+      (ms) =>
+        new Promise((res) => {
+          const out = [];
+          const t0 = performance.now();
+          const step = () => {
+            out.push(window.scrollY);
+            if (performance.now() - t0 < ms) requestAnimationFrame(step);
+            else res(out);
+          };
+          requestAnimationFrame(step);
+        }),
+      2600
+    );
+    await sleep(30);
+    await page.keyboard.press('5');
+    await sleep(220);
+    await page.keyboard.press('2');
+    const ys = await path;
+    await scrollSettled(page);
+    const research = (await sectionsByNumber(page)).find((x) => x.n === 2);
+    const travel = Math.max(...ys) - Math.min(...ys);
+    const jump = ys.slice(1).reduce((m, y, i) => Math.max(m, Math.abs(y - ys[i])), 0);
+    check('keys: a second key mid scroll retargets from where the page is, with no jump', near(research.top, research.margin, 2) && Math.max(...ys) > 300 && jump < travel * 0.35, `peak ${Math.max(...ys)}, lands label at ${research.top.toFixed(1)}px, largest frame ${jump}px of ${travel}px`);
+
+    // guards: modifiers, repeats, focus on controls
+    await page.evaluate(() => window.scrollTo({ top: 0, behavior: 'instant' }));
+    await page.evaluate(() => document.activeElement?.blur());
+    await sleep(400);
+    const untouched = async () => {
+      await sleep(700);
+      const w = await view(page);
+      return w.y === 0 && !['research', 'work', 'experience', 'contact', 'about'].includes(w.active);
+    };
+    const guards = {};
+    for (const combo of ['Control+3', 'Meta+3', 'Alt+3']) {
+      await page.keyboard.press(combo);
+      guards[combo] = await untouched();
+    }
+    await synthKey(page, { key: '3', shiftKey: true });
+    guards.shift = await untouched();
+    await synthKey(page, { key: '3', repeat: true });
+    guards.repeat = await untouched();
+    for (const [name, sel] of [['toggle', '.mode-toggle'], ['legend dot', '.legend-dot:not(.legend-all)'], ['link', '.hero-links a'], ['satellite', '.satellite[href]']]) {
+      const ok = await page.evaluate((q) => {
+        const el = document.querySelector(q);
+        el?.focus();
+        return !!el && document.activeElement === el;
+      }, sel);
+      await page.keyboard.press('3');
+      guards[name] = ok && (await untouched());
+      await page.evaluate(() => document.activeElement?.blur());
+    }
+    check('keys: ignored with ctrl, meta, alt or shift held, on key repeat, and with focus on a control', Object.values(guards).every(Boolean), JSON.stringify(guards));
+
+    // stars mode, a commit card, a mode transition, a peek and a launch all own the page
+    await page.click('.mode-toggle');
+    await sleep(1000);
+    await page.evaluate(() => document.activeElement?.blur());
+    await page.keyboard.press('3');
+    const inStars = await untouched();
+    await page.click('.browse');
+    await sleep(1600);
+    await page.keyboard.press('3');
+    await page.evaluate(() => document.activeElement?.blur());
+    await page.keyboard.press('3');
+    const inCard = await untouched();
+    await page.click('.card-close');
+    await sleep(1400);
+    // out of stars mode, and a key while the page is still easing back
+    await page.click('.mode-toggle');
+    await page.evaluate(() => document.activeElement?.blur());
+    await sleep(60);
+    const leaving = await page.evaluate(() => !document.documentElement.classList.contains('is-stars') && window.__starfield.state().flying);
+    await page.keyboard.press('3');
+    const inTransition = leaving && (await untouched());
+    await sleep(1200);
+    check('keys: nothing happens in stars mode, with a commit card open, or while the mode is still easing out', inStars && inCard && inTransition, JSON.stringify({ inStars, inCard, inTransition }));
+    const sk = await catchableStreak(page);
+    let inPeek = false;
+    let peekDetail = 'no catchable streak';
+    if (sk) {
+      // hover first: the streak slows, so the click lands on it
+      const near = await page.evaluate(() => window.__starfield.streak().screen);
+      await page.mouse.move(near.x, near.y);
+      await sleep(300);
+      const head = await page.evaluate(() => window.__starfield.streak()?.screen);
+      if (head) await page.mouse.click(head.x, head.y);
+      await sleep(1600);
+      await page.keyboard.press('3');
+      await page.evaluate(() => document.activeElement?.blur());
+      await page.keyboard.press('3');
+      const quiet = await untouched();
+      const peeking = await page.evaluate(() => document.documentElement.classList.contains('is-peek'));
+      inPeek = quiet && peeking;
+      peekDetail = JSON.stringify({ quiet, peeking, ...(await view(page)) });
+      await page.click('.card-close');
+      await sleep(1600);
+    }
+    check('keys: nothing happens during a peek', inPeek, peekDetail);
+    await page.evaluate(() => window.scrollTo({ top: document.scrollingElement.scrollHeight, behavior: 'instant' }));
+    await sleep(800);
+    await page.click('.rocket');
+    await sleep(120);
+    await page.evaluate(() => document.activeElement?.blur());
+    await page.keyboard.press('2');
+    await sleep(2400);
+    const launched = await page.evaluate(() => ({ stars: document.documentElement.classList.contains('is-stars'), active: document.activeElement?.id }));
+    check('keys: nothing happens while the rocket is scrolling the page', launched.stars && launched.active !== 'research', JSON.stringify(launched));
+    await page.click('.mode-toggle');
+    await sleep(1500);
+    check('keys checks left the console clean', !logs.length, logs.join(' | '));
+    await context.close();
+  }
+
+  // reduced motion: instant, and nothing jumped over stays hidden
+  {
+    const { page, context, logs } = await open(gpu, `${ORIGIN}/?debug`, { width: 1440, height: 900, reduced: true });
+    await sceneReady(page);
+    await sleep(500);
+    await page.keyboard.press('4');
+    await frames(page, 2);
+    const exp = (await sectionsByNumber(page)).find((s) => s.n === 4);
+    check('keys, reduced motion: the jump is instant', near(exp.top, exp.margin, 2), `label at ${exp.top.toFixed(1)}px a frame later`);
+    await page.keyboard.press('5');
+    await sleep(1200);
+    await page.keyboard.press('1');
+    await sleep(1200);
+    const hidden = await page.evaluate(() => [...document.querySelectorAll('[data-reveal], [data-reveal-group] > *')].filter((el) => getComputedStyle(el).opacity !== '1').map((el) => el.closest('.section')?.id));
+    check('keys, reduced motion: every section jumped to or over has revealed', !hidden.length, hidden.join(', '));
+    check('keys reduced checks left the console clean', !logs.length, logs.join(' | '));
+    await context.close();
+  }
+
+  // the narrow view never loads the keys; leaving the wide view takes them away and coming back restores them once
+  {
+    const ctx = await gpu.newContext({ viewport: { width: 390, height: 844 }, deviceScaleFactor: 3, isMobile: true, hasTouch: true });
+    const p = await ctx.newPage();
+    const asked = [];
+    p.on('request', (r) => asked.push(r.url()));
+    await p.goto(`${ORIGIN}/`, { waitUntil: 'networkidle' });
+    await sleep(600);
+    await p.keyboard.press('3');
+    await sleep(500);
+    const n = await p.evaluate(() => ({ y: window.scrollY, active: document.activeElement?.id }));
+    check('keys: the narrow view never loads them and a number key does nothing there', !asked.some((u) => u.includes('/jump.js')) && n.y === 0 && !n.active, JSON.stringify(n));
+    await ctx.close();
+    const { page, context, logs } = await open(gpu, `${ORIGIN}/?debug`, { width: 1024, height: 768 });
+    await sceneReady(page);
+    await page.setViewportSize({ width: 700, height: 900 });
+    await sleep(700);
+    await synthKey(page, { key: '2' });
+    await sleep(500);
+    const narrowFocus = await page.evaluate(() => document.activeElement?.id);
+    await page.setViewportSize({ width: 1024, height: 768 });
+    await sceneReady(page);
+    await sleep(1200);
+    await page.evaluate(() => document.activeElement?.blur());
+    await page.keyboard.press('4');
+    await scrollSettled(page);
+    const exp = (await sectionsByNumber(page)).find((s) => s.n === 4);
+    const active = await page.evaluate(() => document.activeElement?.id);
+    check('keys: gone in the narrow view after a resize, working again once back on the wide view', narrowFocus !== 'research' && near(exp.top, exp.margin, 2) && active === 'experience', `narrow focus ${narrowFocus}, back wide: label at ${exp.top.toFixed(1)}px, focus ${active}`);
+    check('keys resize checks left the console clean', !logs.length, logs.join(' | '));
+    await context.close();
+  }
+}
+
 await mkdir(OUT, { recursive: true });
 const server = await startServer(PORT);
 const gpu = await launch(gpuLaunch);
@@ -3340,6 +4086,9 @@ try {
   if (want('starscontrast')) await starsContrastChecks(gpu);
   if (want('breakpoint')) await breakpointChecks(gpu);
   if (want('fixes')) await fixesChecks(gpu);
+  if (want('dim')) await dimChecks(gpu);
+  if (want('readout')) await readoutChecks(gpu);
+  if (want('keys')) await keysChecks(gpu);
   if (want('serve')) await serveChecks();
   if (want('print')) await printChecks(gpu);
   if (wantLive) await liveChecks(gpu);

@@ -77,6 +77,13 @@ async function enterWide() {
   }
   if (session) return;
   const s = (session = {});
+  // number keys jump between the sections; the scene and the mode, once loaded, say when the page is not theirs
+  import('./jump.js')
+    .then(({ initJump }) => {
+      if (id !== generation) return;
+      s.jump = initJump({ reduced, busy: () => !!s.mode?.busy || (!!s.scene && !s.scene.settled) });
+    })
+    .catch(() => {});
 
   try {
     await startScene(s, id);
@@ -96,6 +103,7 @@ function leaveWide() {
   const s = session;
   session = null;
   if (!s) return;
+  s.jump?.dispose();
   s.satellite?.dispose();
   s.mode?.dispose();
   s.legend?.dispose();

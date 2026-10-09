@@ -21,6 +21,12 @@ const DRIFT = 0.0025;
 const PARALLAX = 0.06;
 const MODE_TIME = 0.8;
 const FLIGHT_TIME = 1.1;
+// text mode only: past the hero the field and the streaks dim a little behind the content column. field and streak
+// are the reductions over the column; each side fades out across feather (a share of the viewport width, centered
+// on the column's edge), so the sides keep their brightness. the amount ramps in while the about section's top edge
+// rises from enter to settle (shares of the viewport height from its top) and eases with a time constant of ease
+// seconds. fallback is the column, as shares of the width, when the page cannot be measured
+const DIM = { field: 0.32, streak: 0.48, feather: 0.1, enter: 0.85, settle: 0.3, ease: 0.25, fallback: [1 / 3, 2 / 3] };
 
 // overscroll exit at the newest end, armed after some travel. at the edge a new gesture toward the
 // present starts counting. it is new after a pause of at least gap ms that also breaks the stream's
@@ -32,6 +38,11 @@ const FLIGHT_TIME = 1.1;
 const EXIT = { arm: 3, gap: 50, rhythm: 2.5, beat: 400, rebound: 2, floor: 6, threshold: 110, idle: 800, pull: 0.25 };
 const HINT = 'click a star, scroll to travel back in time';
 const EXIT_HINT = 'scroll again to return to the page';
+
+const smoothstep = (a, b, x) => {
+  const t = Math.min(1, Math.max(0, (x - a) / (b - a)));
+  return t * t * (3 - 2 * t);
+};
 
 function createContext(canvas) {
   try {
@@ -129,6 +140,16 @@ export function createStarfield({ data, prs = [], reduced, texture = 'nebula' })
   let signature = '';
   let drag = null;
   let blend = 0;
+  // the text mode dim: its eased amount (0 at the hero, 1 with the content in view, 0 under stars mode and a
+  // peek), the column it shades as shares of the viewport width, and the about section's top in document px
+  let dim = 0;
+  let dimForce = null;
+  let aboutTop = 0;
+  const column = { left: DIM.fallback[0], right: DIM.fallback[1] };
+  // the readout names the month at one reference depth. in free travel that is the layer as far ahead of the
+  // camera as the newest commit sits from home. a flight carries it from where it read to its target on the
+  // camera tween's own eased progress, so the month never runs backward and a focused commit reads its own month
+  const reading = { held: false, from: 0, to: 0, k: 0 };
 
   const busy = () => focus >= 0 || pr !== null;
   const perf = createPerf({ onChange: () => applySize() });
@@ -193,9 +214,25 @@ export function createStarfield({ data, prs = [], reduced, texture = 'nebula' })
     uniforms.uMaxPoint.value = maxPoint;
     canvas.dataset.dpr = String(perf.dpr);
     signature = '';
+    measureColumn();
+  }
+
+  // the content column and the about section, read on resize and font load, never per frame
+  function measureColumn() {
+    const r = document.querySelector('main .section')?.getBoundingClientRect();
+    if (r && r.width > 0) {
+      column.left = (r.left - view.left) / view.w;
+      column.right = (r.right - view.left) / view.w;
+      aboutTop = r.top + window.scrollY;
+    } else {
+      [column.left, column.right] = DIM.fallback;
+      aboutTop = view.h;
+    }
+    uniforms.uColumn.value.set(column.left, column.right, DIM.feather / 2, 0);
   }
 
   const resizer = new ResizeObserver(applySize);
+  const pageResizer = new ResizeObserver(measureColumn);
   let dprQuery = null;
   function watchDpr() {
     dprQuery?.removeEventListener('change', onDpr);
@@ -275,6 +312,25 @@ export function createStarfield({ data, prs = [], reduced, texture = 'nebula' })
     if (!exit.hint) setHint(hint.textContent, false);
   }
 
+  const freeReading = () => cam.z + layout.zNewest;
+
+  function readingDepth() {
+    return reading.held ? reading.from * (1 - reading.k) + reading.to * reading.k : freeReading();
+  }
+
+  // the next camera flight carries the reference depth from wherever it reads now to `to`
+  function aimReading(to) {
+    reading.from = readingDepth();
+    reading.to = to;
+    reading.k = 0;
+    reading.held = true;
+  }
+
+  // onUpdate of that camera tween
+  function carryReading() {
+    reading.k = this.ratio;
+  }
+
   function focusStar(i, opener) {
     if (i < 0 || i >= layout.n || pr) return;
     // saved is the camera before the first flight, chained flights keep it. a flight started on the way back
@@ -289,6 +345,7 @@ export function createStarfield({ data, prs = [], reduced, texture = 'nebula' })
     if (card.isOpen) card.setMoving(true);
     const p = worldPosition(i);
     const duration = still() ? 0 : FLIGHT_TIME;
+    aimReading(layout.baseZ[i]);
     gsap.to(cam, {
       x: p.x,
       y: p.y,
@@ -296,7 +353,9 @@ export function createStarfield({ data, prs = [], reduced, texture = 'nebula' })
       duration,
       ease: 'power3.inOut',
       overwrite: true,
+      onUpdate: carryReading,
       onComplete: () => {
+        reading.k = 1;
         flying = false;
         if (focus === i) card.show({ kind: 'commit', index: i, nav: navFor(i) }, opener);
       },
@@ -313,15 +372,18 @@ export function createStarfield({ data, prs = [], reduced, texture = 'nebula' })
     returning = back;
     const duration = still() ? 0 : FLIGHT_TIME;
     flying = true;
+    aimReading(back.z + layout.zNewest);
     gsap.to(cam, {
       ...back,
       duration,
       ease: 'power3.inOut',
       overwrite: true,
+      onUpdate: carryReading,
       onComplete: () => {
         flying = false;
         returning = null;
         travelTarget = cam.z;
+        reading.held = false;
       },
     });
     gsap.to(look, { focal: mode === 'stars' ? STAR_FOCAL : CONTENT_FOCAL, duration, ease: 'power3.inOut', overwrite: 'auto' });
@@ -342,6 +404,9 @@ export function createStarfield({ data, prs = [], reduced, texture = 'nebula' })
     setHover(-1);
     releaseExit();
     fadeHint();
+    // the readout has nothing to say about a pull request: it holds its month and fades out until the return
+    aimReading(readingDepth());
+    readout.classList.add('is-faded');
     api.onPr?.(true, ctx);
     const duration = still() ? 0 : FLIGHT_TIME;
     gsap.to(look, { intensity: 1, nebula: 1, duration: still() ? 0 : MODE_TIME, ease: 'power2.inOut', overwrite: 'auto' });
@@ -375,13 +440,17 @@ export function createStarfield({ data, prs = [], reduced, texture = 'nebula' })
     const duration = still() ? 0 : FLIGHT_TIME;
     flying = true;
     travelTarget = back.travelTarget;
+    aimReading(back.cam.z + layout.zNewest);
+    readout.classList.remove('is-faded');
     gsap.to(cam, {
       ...back.cam,
       duration,
       ease: 'power3.inOut',
       overwrite: true,
+      onUpdate: carryReading,
       onComplete: () => {
         flying = false;
+        reading.held = false;
       },
     });
     gsap.to(look, { ...back.look, duration, ease: 'power3.inOut', overwrite: true });
@@ -592,9 +661,9 @@ export function createStarfield({ data, prs = [], reduced, texture = 'nebula' })
 
   function updateReadout() {
     if (mode !== 'stars') return;
-    // the most recent layer in front of the camera, as far ahead as the newest commit sits from home:
-    // the newest commit's month at home, then the layer the camera is about to pass while travelling
-    const label = formatMonth(layout.timeAt(cam.z + layout.zNewest));
+    // the newest commit's month at home, the layer the camera is about to pass while travelling, and the
+    // focused commit's own month once a flight to it lands
+    const label = formatMonth(layout.timeAt(readingDepth()));
     if (label !== lastMonth) {
       lastMonth = label;
       readout.textContent = label;
@@ -632,6 +701,13 @@ export function createStarfield({ data, prs = [], reduced, texture = 'nebula' })
     uniforms.uIntensity.value = look.intensity + (CONTENT_INTENSITY - look.intensity) * pull;
     blend = look.nebula * (1 - pull);
 
+    // the text mode dim follows the about section into view and leaves with the page whenever stars mode or a
+    // peek takes over, through the same nebula blend. it eases on top, so a jump animates instead of snapping
+    const ramp = smoothstep(DIM.enter, DIM.settle, (aboutTop - window.scrollY) / view.h);
+    const goal = dimForce ?? ramp * (1 - look.nebula);
+    dim = rm || Math.abs(goal - dim) < 1e-3 ? goal : dim + (goal - dim) * (1 - Math.exp(-dt / DIM.ease));
+    uniforms.uDim.value = dim * DIM.field;
+
     const k = 1 - Math.exp(-dt * 3);
     const amount = rm ? 0 : busy() ? PARALLAX * 0.3 : PARALLAX;
     parallax.x += (pointer.nx * amount - parallax.x) * k;
@@ -650,7 +726,7 @@ export function createStarfield({ data, prs = [], reduced, texture = 'nebula' })
     uniforms.uTwinkle.value = rm ? 0 : 0.12;
     uniforms.uFocusId.value = focus;
     nebula?.update(time, cam, view.w / view.h, blend);
-    streaks.frame();
+    streaks.frame(dim * DIM.streak);
 
     updateHover();
     updateReadout();
@@ -660,7 +736,7 @@ export function createStarfield({ data, prs = [], reduced, texture = 'nebula' })
     if (rm) {
       const sig = [
         camera.position.x, camera.position.y, camera.position.z,
-        uniforms.uIntensity.value, uniforms.uFocal.value, drift, blend,
+        uniforms.uIntensity.value, uniforms.uFocal.value, drift, blend, uniforms.uDim.value, column.left, column.right,
         uniforms.uHi.value.join(), uniforms.uLo.value.join(), focus, canvas.width, canvas.height,
       ].join('|');
       if (sig === signature) return;
@@ -719,6 +795,8 @@ export function createStarfield({ data, prs = [], reduced, texture = 'nebula' })
 
   applySize();
   resizer.observe(canvas);
+  pageResizer.observe(document.querySelector('main') ?? document.body);
+  document.fonts?.ready.then(measureColumn);
   watchDpr();
   start();
   gsap.to(look, { intensity: CONTENT_INTENSITY, duration: still() ? 0 : 1.6, ease: 'power2.out' });
@@ -729,6 +807,10 @@ export function createStarfield({ data, prs = [], reduced, texture = 'nebula' })
     get prOpen() {
       return pr !== null;
     },
+    // the page is plainly itself: text mode, nothing open or in flight, the last mode change fully eased out
+    get settled() {
+      return mode === 'content' && !busy() && !flying && look.nebula === 0;
+    },
     setMode(next) {
       if (next === mode) return;
       // a pull request card keeps its own return context
@@ -738,6 +820,7 @@ export function createStarfield({ data, prs = [], reduced, texture = 'nebula' })
       exit.acc = 0;
       exit.hint = false;
       band.target = 0;
+      readout.classList.remove('is-faded');
       if (next === 'stars') {
         const duration = still() ? 0 : MODE_TIME;
         travelTarget = Math.min(travelMax, Math.max(travelMin, cam.z));
@@ -762,6 +845,7 @@ export function createStarfield({ data, prs = [], reduced, texture = 'nebula' })
         card.hide();
       }
       returning = null;
+      reading.held = false;
       setHover(-1);
       travelTarget = 0;
       const duration = still() ? 0 : hadCard ? FLIGHT_TIME : MODE_TIME;
@@ -800,6 +884,7 @@ export function createStarfield({ data, prs = [], reduced, texture = 'nebula' })
     dispose() {
       stop();
       resizer.disconnect();
+      pageResizer.disconnect();
       dprQuery?.removeEventListener('change', onDpr);
       gsap.killTweensOf([cam, look, ...langs]);
       window.removeEventListener('wheel', onWheel);
@@ -835,6 +920,8 @@ export function createStarfield({ data, prs = [], reduced, texture = 'nebula' })
     pickAt: (x, y, exclude = -1) => pickAt(x, y, exclude),
     streak: () => streaks.debug(),
     fireStreak: () => streaks.fireNow(),
+    // pins the text mode dim's amount (null hands it back), so a check can compare the field with and without it
+    forceDim: (v) => (dimForce = v),
     // pins a language as the legend would, including one with no commits
     pin: (index) => api.setLanguageFocus(index),
     nebulaColors: () => nebula?.colors() ?? null,
@@ -855,6 +942,9 @@ export function createStarfield({ data, prs = [], reduced, texture = 'nebula' })
       focal: uniforms.uFocal.value,
       intensity: uniforms.uIntensity.value,
       nebula: blend,
+      dim,
+      column: { left: column.left, right: column.right, feather: DIM.feather, field: DIM.field, streak: DIM.streak },
+      reading: readingDepth(),
       band: band.value,
       exit: { ...exit },
       hasNebula: !!nebula,
