@@ -1,5 +1,5 @@
 {
-  "generated": "2026-10-09T13:25:00Z",
+  "generated": "2026-10-10T12:40:28Z",
   "user": "santihdzs",
   "mock": false,
   "languages": [
@@ -26,6 +26,9 @@
     {"name":"TC2005B","lang":0,"primary":"javascript"}
   ],
   "commits": [
+    [9,"69010578e9b1728843c9cde523af7f5d851f3727",1791577345,719,116,8,"uniform dim, streak click rule, browse group polish"],
+    [9,"ab654d83ed7ffb0a628c926736ac41f82a2da00a",1791577345,993,27,14,"Added dim on scroll"],
+    [9,"fd640e7378ba679894c0163b2c648ae702175177",1791577345,624,51,4,"browse scope toggle and dim tuning"],
     [9,"2492ba40b36b34c86622c02458c560893acfcbf1",1791532991,65,5,2,"satellite: dim the tile while it passes behind the hero text"],
     [9,"731da78205a359d5a67810a228e39b2ba394f8c3",1791532991,39,5,4,"footer: copyright line with the commit stat"],
     [9,"88e552d96339399eaef81acc8620355662f2ea4d",1791532991,2786,400,32,"Added site content"],
