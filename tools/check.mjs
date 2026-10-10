@@ -103,14 +103,14 @@ async function scrollThrough(page) {
   await sleep(1200);
 }
 
-async function staticChecks() {
+async function staticChecks(gpu) {
   const files = [];
   async function walk(dir) {
     for (const e of await readdir(dir, { withFileTypes: true })) {
       if (['node_modules', '.git', 'out', 'vendor', 'fonts', '.claude'].includes(e.name)) continue;
       const p = path.join(dir, e.name);
       if (e.isDirectory()) await walk(p);
-      else if (/\.(html|css|js|mjs|json|md|yml|svg)$/.test(e.name)) files.push(p);
+      else if (/\.(html|css|js|mjs|json|md|yml|svg|txt|xml)$/.test(e.name)) files.push(p);
     }
   }
   await walk(ROOT);
@@ -133,9 +133,73 @@ async function staticChecks() {
   check('404.html uses only root absolute paths', !relative404.length, relative404.join(', '));
   const html = await readFile(path.join(ROOT, 'index.html'), 'utf8');
   check('exactly one h1', (html.match(/<h1\b/g) ?? []).length === 1);
-  check('no canonical, cname or og:image', !/rel="canonical"|og:image/.test(html));
   const vendor = await readdir(path.join(ROOT, 'vendor', 'three'));
   check('three.module.js and three.core.js vendored', vendor.includes('three.module.js') && vendor.includes('three.core.js'));
+
+  // reach: robots, sitemap, canonical, social image and structured data, all on the apex host
+  const HOME = 'https://santihdzs.com/';
+  const local = (u) => `${ORIGIN}${new URL(u).pathname}`;
+  const robots = await fetch(`${ORIGIN}/robots.txt`);
+  const robotsText = await robots.text();
+  const sitemapLine = robotsText.match(/^sitemap:\s*(\S+)\s*$/im)?.[1];
+  check('robots.txt: 200, plain text, disallows nothing, its Sitemap line is the absolute sitemap url', robots.status === 200 && robots.headers.get('content-type').startsWith('text/plain') && sitemapLine === `${HOME}sitemap.xml` && !/^disallow:\s*\S/im.test(robotsText), `${robots.status} ${robots.headers.get('content-type')}, sitemap ${sitemapLine}`);
+
+  const sitemap = await fetch(`${ORIGIN}/sitemap.xml`);
+  const sitemapText = await sitemap.text();
+  const { page, context, logs, failed } = await open(gpu, `${ORIGIN}/`);
+  const locs = await page.evaluate((xml) => {
+    const doc = new DOMParser().parseFromString(xml, 'application/xml');
+    if (doc.querySelector('parsererror') || doc.documentElement.localName !== 'urlset') return null;
+    return [...doc.getElementsByTagName('loc')].map((l) => l.textContent.trim());
+  }, sitemapText);
+  check('sitemap.xml: 200, xml type, parses as a urlset', sitemap.status === 200 && /\/xml\b/.test(sitemap.headers.get('content-type')) && !!locs?.length, `${sitemap.status} ${sitemap.headers.get('content-type')}, ${locs?.length ?? 'no'} urls`);
+  const statuses = await Promise.all((locs ?? []).map(async (u) => [u, (await fetch(local(u))).status]));
+  const apex = (u) => { try { const x = new URL(u); return x.protocol === 'https:' && x.host === 'santihdzs.com'; } catch { return false; } };
+  check('sitemap.xml: every url is absolute https on the apex host and resolves locally with 200, home and cv.pdf listed', statuses.length && statuses.every(([u, s]) => apex(u) && s === 200) && locs.includes(HOME) && locs.includes(`${HOME}cv.pdf`), JSON.stringify(statuses));
+
+  const head = await page.evaluate(() => {
+    const meta = (k) => document.querySelector(`meta[property="${k}"], meta[name="${k}"]`)?.content;
+    const ld = [...document.querySelectorAll('script[type="application/ld+json"]')].map((s) => s.textContent);
+    return {
+      canonical: document.querySelector('link[rel="canonical"]')?.href,
+      ogUrl: meta('og:url'),
+      ogImage: meta('og:image'),
+      ogW: meta('og:image:width'),
+      ogH: meta('og:image:height'),
+      ogAlt: meta('og:image:alt'),
+      twImage: meta('twitter:image'),
+      twAlt: meta('twitter:image:alt'),
+      card: meta('twitter:card'),
+      title: document.title,
+      description: meta('description'),
+      ld,
+      hero: [...document.querySelectorAll('.hero-links a')].map((a) => a.href).filter((h) => /github\.com|linkedin\.com/.test(h)),
+    };
+  });
+  const sitemapHome = locs?.find((u) => new URL(u).pathname === '/');
+  check('canonical, og:url and the sitemap home url are identical', head.canonical === HOME && head.ogUrl === HOME && sitemapHome === HOME, `${head.canonical} | ${head.ogUrl} | ${sitemapHome}`);
+
+  // shortcut: reads png headers only, extend it if the image ever becomes a jpeg
+  let img = null;
+  try {
+    img = await readFile(path.join(ROOT, new URL(head.ogImage).pathname));
+  } catch {}
+  const png = img?.subarray(1, 4).toString() === 'PNG';
+  const size = png && { w: img.readUInt32BE(16), h: img.readUInt32BE(20), kb: img.length / 1024 };
+  check('og:image: absolute on the apex host, the file exists, 1200x630 from its header, under 300 kb, width, height, alt and twitter:image agree', apex(head.ogImage) && size && size.w === 1200 && size.h === 630 && size.kb < 300 && head.ogW === '1200' && head.ogH === '630' && head.ogAlt && head.twImage === head.ogImage && head.twAlt === head.ogAlt, `${head.ogImage}, ${size ? `${size.w}x${size.h}, ${size.kb.toFixed(0)} kb` : 'no png'}`);
+  check('twitter:card is summary_large_image', head.card === 'summary_large_image', head.card);
+
+  let graph = null;
+  try {
+    graph = head.ld.length === 1 ? JSON.parse(head.ld[0])['@graph'] : null;
+  } catch {}
+  const of = (t) => (graph ?? []).filter((n) => n['@type'] === t);
+  const [site] = of('WebSite');
+  const [person] = of('Person');
+  const same = (a, b) => b.length === 2 && a?.length === b.length && b.every((v) => a.includes(v));
+  check('json-ld: one block that parses, one WebSite and one Person, named as the title, sameAs the hero github and linkedin, description as the meta', of('WebSite').length === 1 && of('Person').length === 1 && site.name === head.title && person.name === head.title && site.url === HOME && person.url === HOME && same(person.sameAs, head.hero) && person.description === head.description, JSON.stringify(graph));
+  check('static page load left the console clean', !logs.length && !failed.length, [...logs, ...failed].join(' | '));
+  await context.close();
 }
 
 async function loadChecks(gpu) {
@@ -2159,9 +2223,9 @@ async function catchChecks(gpu) {
 // the tree before a change, served next to this one, for what must not change: CHECK_BASELINE=<a copy of the repo>
 const CHROME = 'main, .site-footer, .topbar, .orbit, .stars-ui, .skip, .card, .card-tether, .focus-pulse, .star-ring { visibility: hidden !important }';
 
-// one canvas frame with the page's chrome hidden, on a fake clock and a seeded random, so two trees given the same
-// steps draw the same pixels
-async function canvasFrame(gpu, origin, steps) {
+// one canvas frame with the page's chrome hidden (or what hide names), on a fake clock and a seeded random, so two
+// trees given the same steps draw the same pixels
+async function canvasFrame(gpu, origin, steps, hide = CHROME) {
   const context = await gpu.newContext({ viewport: { width: 1440, height: 900 }, deviceScaleFactor: 1 });
   await context.addInitScript(() => {
     let seed = 12345;
@@ -2174,7 +2238,7 @@ async function canvasFrame(gpu, origin, steps) {
   await sceneReady(page);
   await context.clock.runFor(3000);
   const info = await steps(page, context.clock);
-  await page.addStyleTag({ content: CHROME });
+  if (hide) await page.addStyleTag({ content: hide });
   await context.clock.runFor(100);
   await sleep(200);
   const png = await page.screenshot();
@@ -2224,6 +2288,8 @@ async function baselineChecks(gpu) {
   const other = await serveBaseline(PORT + 1);
   const BASE = `http://localhost:${PORT + 1}`;
   try {
+    const body = async (dir) => (await readFile(path.join(dir, 'index.html'), 'utf8')).replace(/^[\s\S]*?(?=<body\b)/, '');
+    check('baseline: the body of index.html is byte identical to the baseline tree', (await body(ROOT)) === (await body(path.resolve(dir))));
     const clickHead = async (page, clock) => {
       await page.evaluate(() => window.__starfield.fireStreak());
       await clock.runFor(1200);
@@ -2238,19 +2304,20 @@ async function baselineChecks(gpu) {
     };
     const scenes = [
       ['the field at the hero', async () => null],
+      ['the hero with its page chrome', async () => null, ''],
       ['a streak in flight at the hero', async (page, clock) => (await page.evaluate(() => window.__starfield.fireStreak()), await clock.runFor(1500), page.evaluate(() => window.__starfield.streak()))],
       ['a paused streak under its card, from the hero', clickHead],
       ['the field in stars mode', toStars],
       ['a paused streak under its card in stars mode', async (page, clock) => (await toStars(page, clock), clickHead(page, clock))],
     ];
-    for (const [name, steps] of scenes) {
+    for (const [name, steps, hide] of scenes) {
       let a;
       let b;
       let d;
       // one retake: the gpu has been seen to differ by a level or two on a few hundred pixels once in a while
       for (let k = 0; k < 2 && !(d && d.n === 0); k++) {
-        a = await canvasFrame(gpu, ORIGIN, steps);
-        b = await canvasFrame(gpu, BASE, steps);
+        a = await canvasFrame(gpu, ORIGIN, steps, hide);
+        b = await canvasFrame(gpu, BASE, steps, hide);
         d = await pixelDiff(gpu, a.png, b.png);
       }
       const paused = name.includes('paused') ? !!a.info?.pr && a.info.k?.focused && a.info.k.dim === 0 : true;
@@ -5157,7 +5224,7 @@ await mkdir(OUT, { recursive: true });
 const server = await startServer(PORT);
 const gpu = await launch(gpuLaunch);
 try {
-  if (want('static')) await staticChecks();
+  if (want('static')) await staticChecks(gpu);
   if (want('load') || want('mobile')) await loadChecks(gpu);
   if (want('interact')) await interactChecks(gpu);
   if (want('reduced')) await reducedChecks(gpu);

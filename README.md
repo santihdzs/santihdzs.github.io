@@ -76,6 +76,22 @@ too. Each section is a `<section class="section">` with a rail label (`01 / abou
 Colors and type live in `css/tokens.css`, star colors in `js/palette.js`. Which language gets which color is decided in
 `scripts/build-commits.mjs` (`SLOT_PREFS`).
 
+## search and sharing
+
+- `robots.txt` allows everything and points at the sitemap. `404.html` keeps itself out of the index with its own
+  `noindex` meta.
+- `sitemap.xml` lists the home page and `cv.pdf` as absolute `https://santihdzs.com/` urls, without `lastmod`, since
+  nothing would keep it current. Add a url here only for a page that exists.
+- The head of `index.html` carries the canonical url, the open graph and twitter tags, and one json-ld block: a
+  `WebSite` (the site name for search results) and a `Person` built only from facts on the page. Their name, url,
+  description and profile links must stay in step with the title, meta description and hero links.
+- `assets/og.png` (1200x630) is the social preview: the real hero over the real starfield, with only the kicker and
+  the name, scaled up. Regenerate it after the hero changes with `node scripts/og-image.mjs` (needs
+  `cd tools && npm install`); it is not run by ci or the daily workflow.
+- The google search console verification file (`google*.html`) is added by the owner and must stay in the repo root.
+
+`node tools/check.mjs static` checks all of the above.
+
 ## data refresh
 
 A github actions workflow (`.github/workflows/commits.yml`) runs daily and on demand. It runs both builders and

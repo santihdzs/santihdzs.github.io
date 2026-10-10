@@ -20,6 +20,7 @@ const TYPES = {
   '.pdf': 'application/pdf',
   '.png': 'image/png',
   '.txt': 'text/plain; charset=utf-8',
+  '.xml': 'application/xml; charset=utf-8',
 };
 const COMPRESS = new Set(['.html', '.css', '.js', '.mjs', '.json', '.svg', '.txt']);
 
