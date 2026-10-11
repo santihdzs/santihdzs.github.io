@@ -792,8 +792,10 @@ async function alignChecks() {
         const gutter = await page.evaluate(() => window.innerWidth - document.documentElement.clientWidth);
         await page.click('.mode-toggle');
         await sleep(600);
+        // half width of the window each star's centroid is measured in
+        const r = 22;
         // isolated, sharp, reasonably large stars, spread across the width
-        const stars = await page.evaluate(() => {
+        const stars = await page.evaluate((r) => {
           const f = window.__starfield;
           const st = f.state();
           const all = [];
@@ -813,8 +815,15 @@ async function alignChecks() {
             );
           });
           picks.sort((a, b) => b.x - a.x);
-          return picks.slice(0, 3);
-        });
+          // the discs of other stars that reach into a pick's measuring window stay out of its centroid. the rule above
+          // keeps each of them at least 6px clear of the pick's own disc
+          return picks.slice(0, 3).map((p) => ({
+            ...p,
+            holes: all
+              .filter((q) => q.i !== p.i && q.dist >= 0.8 && q.coc < 26 && Math.abs(q.x - p.x) < r + q.size / 2 + 3 && Math.abs(q.y - p.y) < r + q.size / 2 + 3)
+              .map((q) => [q.x, q.y, q.size / 2 + 3]),
+          }));
+        }, r);
         if (!stars.length) {
           check(`${tag}: alignment star available`, false);
           await context.close();
@@ -824,12 +833,11 @@ async function alignChecks() {
         let worstRing = 0;
         const offsets = [];
         for (const star of stars) {
-          const r = 22;
           const clip = { x: Math.round(star.x - r), y: Math.round(star.y - r), width: 2 * r, height: 2 * r };
           const png = await page.screenshot({ clip });
           const probe = await browser.newPage();
           const c = await probe.evaluate(
-            async ({ src }) => {
+            async ({ src, holes, size }) => {
               const img = new Image();
               img.src = src;
               await img.decode();
@@ -839,10 +847,13 @@ async function alignChecks() {
               const g = cv.getContext('2d');
               g.drawImage(img, 0, 0);
               const d = g.getImageData(0, 0, img.width, img.height).data;
+              const s = img.width / size;
               let max = 0;
               const lum = [];
               for (let k = 0; k < d.length; k += 4) {
-                const l = 0.2126 * d[k] + 0.7152 * d[k + 1] + 0.0722 * d[k + 2];
+                const x = (((k / 4) % img.width) + 0.5) / s;
+                const y = (Math.floor(k / 4 / img.width) + 0.5) / s;
+                const l = holes.some(([hx, hy, hr]) => Math.hypot(x - hx, y - hy) < hr) ? 0 : 0.2126 * d[k] + 0.7152 * d[k + 1] + 0.0722 * d[k + 2];
                 lum.push(l);
                 max = Math.max(max, l);
               }
@@ -856,14 +867,14 @@ async function alignChecks() {
               });
               return { x: sx / sw, y: sy / sw, w: img.width, max };
             },
-            { src: `data:image/png;base64,${png.toString('base64')}` }
+            { src: `data:image/png;base64,${png.toString('base64')}`, holes: star.holes.map(([x, y, hr]) => [x - clip.x, y - clip.y, hr]), size: clip.width }
           );
           await probe.close();
           const scale = c.w / clip.width;
           const cx = clip.x + c.x / scale;
           const cy = clip.y + c.y / scale;
           worstPix = Math.max(worstPix, Math.hypot(cx - star.x, cy - star.y));
-          offsets.push(`${(cx - star.x).toFixed(2)},${(cy - star.y).toFixed(2)}@${Math.round(star.x)}`);
+          offsets.push(`${(cx - star.x).toFixed(2)},${(cy - star.y).toFixed(2)}@${Math.round(star.x)}${star.holes.length ? ` (${star.holes.length} masked)` : ''}`);
           await page.mouse.move(star.x, star.y);
           await sleep(120);
           const ring = await page.evaluate(() => {
@@ -1305,6 +1316,8 @@ async function repoScopeChecks(gpu) {
     return -1;
   };
   const all = [...Array(n).keys()];
+  // the newest commit outside the newest commit's repo, where stepping back with the toggle off first changes repo
+  const cross = rows.findIndex((r) => r.repo !== rows[0].repo);
   // the one counter the card shows: n of total with the toggle off, x of y in this repo with it on, neither for a
   // commit outside the pin
   const counters = (i, pin, repoOnly) => {
@@ -1507,12 +1520,15 @@ async function repoScopeChecks(gpu) {
   a = await look(page);
   check('browse ignores the toggle: the newest commit overall opens', a.focus === 0 && agrees(a, null, true), JSON.stringify(a));
   check('the live region names the shown counter: x of y in this repo with the toggle on', a.live.endsWith(` commit ${counters(0, null, true).pos}.`) && !a.live.includes(` of ${n}.`), a.live);
-  await page.keyboard.press('ArrowLeft');
-  await page.keyboard.press('ArrowLeft');
+  // as many steps back as the toggle off walk takes to leave the repo
+  let want = 0;
+  for (let k = 0; k < cross; k++) {
+    await page.keyboard.press('ArrowLeft');
+    if (ref(want, -1, null, true) >= 0) want = ref(want, -1, null, true);
+  }
   b = await look(page);
-  check('a toggle set before the card rules its steps: two steps back stay in the repo', b.focus === ref(ref(0, -1, null, true), -1, null, true) && repoOf(b.focus) === repoOf(0) && b.focus !== 2, `${a.focus} -> ${b.focus}`);
-  await page.keyboard.press('ArrowRight');
-  await page.keyboard.press('ArrowRight');
+  check('a toggle set before the card rules its steps: the steps back that leave the repo with it off stay in the repo', b.focus === want && repoOf(b.focus) === repoOf(0) && b.focus !== cross, `${a.focus} -> ${b.focus} in ${cross} steps`);
+  for (let k = 0; k < cross; k++) await page.keyboard.press('ArrowRight');
 
   // toggle on: arrows and buttons stay in the repo and agree, from its newest through the middle to its oldest and back
   let w = await walk(null, true);
@@ -1524,13 +1540,12 @@ async function repoScopeChecks(gpu) {
   await page.mouse.move(720, 600);
   a = await look(page);
   check('repo toggle off with a card open: the rule changes in place, no camera movement or card reload', !a.repoOnly && a.pressed === 'false' && a.focus === 0 && agrees(a, null, false), JSON.stringify(a));
-  await page.keyboard.press('ArrowLeft');
-  await page.keyboard.press('ArrowLeft');
+  for (let k = 0; k < cross; k++) await page.keyboard.press('ArrowLeft');
   a = await look(page);
   await frames(page, 2);
   a = await look(page);
-  check('repo toggle off: the arrows cross into another repo', a.focus === 2 && repoOf(2) !== repoOf(1), JSON.stringify(a));
-  check('the live region names the shown counter: n of total with the toggle off', a.live.endsWith(` commit ${counters(2, null, false).count}.`) && !a.live.includes('in this repo'), a.live);
+  check('repo toggle off: the arrows cross into another repo', a.focus === cross && repoOf(cross) !== repoOf(cross - 1), JSON.stringify(a));
+  check('the live region names the shown counter: n of total with the toggle off', a.live.endsWith(` commit ${counters(cross, null, false).count}.`) && !a.live.includes('in this repo'), a.live);
   // the shots show the toggle itself, not its accent focus ring
   await page.focus('.card');
   await shot('repo-card-off');
@@ -1560,7 +1575,7 @@ async function repoScopeChecks(gpu) {
   check('toggle focused, at the end: the arrow does nothing at all', quiet(a, b) && said === before && b.active === 'toggle', JSON.stringify(b));
   await page.keyboard.press('ArrowLeft');
   b = await look(page);
-  check('toggle focused: the arrow steps the card like the card\'s own keys, no travel, focus stays on the toggle', b.focus === ref(2, -1, null, true) && b.travel === a.travel && b.active === 'toggle' && agrees(b, null, true), JSON.stringify(b));
+  check('toggle focused: the arrow steps the card like the card\'s own keys, no travel, focus stays on the toggle', b.focus === ref(cross, -1, null, true) && b.travel === a.travel && b.active === 'toggle' && agrees(b, null, true), JSON.stringify(b));
   await frames(page, 2);
   await page.focus('.card');
   await shot('repo-card-on');
