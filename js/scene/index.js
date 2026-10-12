@@ -623,13 +623,13 @@ export function createStarfield({ data, prs = [], reduced, texture = 'nebula' })
     setTimeout(() => (drag = null), 0);
   }
 
-  function pickAt(clientX, clientY, exclude = -1) {
+  function pickAt(clientX, clientY, focused = -1) {
     picker.prepare(camera, points);
     return picker.nearest(clientX - view.left, clientY - view.top, view.w, view.h, {
       focal: uniforms.uFocal.value,
       px: uniforms.uPx.value,
       langs,
-      exclude,
+      focus: focused,
     });
   }
 
@@ -645,15 +645,10 @@ export function createStarfield({ data, prs = [], reduced, texture = 'nebula' })
     if (mode !== 'stars') return;
     if (drag && drag.moved > 8) return;
     const i = pickAt(e.clientX, e.clientY, focus);
-    if (i >= 0) {
-      focusStar(i);
-      return;
-    }
-    if (focus >= 0) {
-      const s = screenOf(focus);
-      const onFocused = s && Math.hypot(s.x - e.clientX, s.y - e.clientY) <= Math.max(14, s.size / 2 + 8);
-      if (!onFocused) unfocus();
-    }
+    // a click on the focused star itself does nothing
+    if (i === focus) return;
+    if (i >= 0) focusStar(i);
+    else unfocus();
   }
 
   function updateHover() {
@@ -661,7 +656,8 @@ export function createStarfield({ data, prs = [], reduced, texture = 'nebula' })
       setHover(-1);
       return;
     }
-    setHover(pickAt(pointer.x, pointer.y, focus));
+    const i = pickAt(pointer.x, pointer.y, focus);
+    setHover(i === focus ? -1 : i);
     if (hover < 0) return;
     const s = screenOf(hover);
     if (!s) return;
@@ -935,7 +931,7 @@ export function createStarfield({ data, prs = [], reduced, texture = 'nebula' })
       const d = picker.disc(i, s.dist, uniforms.uFocal.value, uniforms.uPx.value, langs);
       return { x: s.x + view.left, y: s.y + view.top, dist: s.dist, size: d.size, coc: d.coc, lo: d.lo };
     },
-    pickAt: (x, y, exclude = -1) => pickAt(x, y, exclude),
+    pickAt: (x, y, focused = -1) => pickAt(x, y, focused),
     streak: () => streaks.debug(),
     fireStreak: () => streaks.fireNow(),
     // pins the text mode dim's amount (null hands it back), so a check can compare the field with and without it

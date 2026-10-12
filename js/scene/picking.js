@@ -36,18 +36,25 @@ export function createPicker(layout) {
     return { core, coc, size: core + coc, lo };
   }
 
+  const reach = (size) => Math.max(14, size / 2 + 8);
+
   // a star is pickable while its rendered blur still reads as a star. the click radius grows
   // with the displayed disc, and the score favors proximity first and sharpness second.
-  function nearest(px, py, w, h, { focal, px: scale, langs, exclude = -1 }) {
+  // the focused star sits in front of everything, so inside its own radius it wins outright
+  function nearest(px, py, w, h, { focal, px: scale, langs, focus = -1 }) {
+    if (focus >= 0) {
+      const s = project(focus, w, h);
+      if (s.dist > 0.05 && Math.hypot(s.x - px, s.y - py) <= reach(disc(focus, s.dist, focal, scale, langs, focus).size)) return focus;
+    }
     let best = -1;
     let bestScore = Infinity;
     for (let i = 0; i < layout.n; i++) {
-      if (i === exclude) continue;
+      if (i === focus) continue;
       const s = project(i, w, h);
       if (s.dist < 0.8) continue;
       const d = disc(i, s.dist, focal, scale, langs);
       if (d.lo > 0.5 || d.coc >= PICK_COC) continue;
-      const radius = Math.max(14, d.size / 2 + 8);
+      const radius = reach(d.size);
       const gap = Math.hypot(s.x - px, s.y - py);
       if (gap > radius) continue;
       const score = gap / radius + 0.8 * (d.coc / PICK_COC);

@@ -655,6 +655,12 @@
   opacity: 0;
 }
 
+/* without that fade the label sits on bare stars, where muted falls under 4.5:1 */
+.is-stars .legend-label,
+.is-peek .legend-label {
+  color: var(--text);
+}
+
 @media (prefers-reduced-motion: reduce) {
   .stars-ui,
   .is-stars .stars-ui,

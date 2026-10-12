@@ -2701,6 +2701,44 @@ async function chainChecks(gpu) {
     s = await state(page);
     check('over the card: no hover, default cursor, clicks stay in the card', overCard.hover === -1 && overCard.cursor === '' && s.focus === target.i && !(await page.locator('.card').isHidden()));
 
+    await sweepFocused(page, 'chain, second star');
+    // the pickable star closest to the focused star's edge, at least 4px outside its radius, still takes the click,
+    // and the hover said so first
+    const out = await page.evaluate(() => {
+      const f = window.__starfield;
+      const focus = f.state().focus;
+      const c = f.project(focus);
+      const r = Math.max(14, c.size / 2 + 8);
+      const card = document.querySelector('.card').getBoundingClientRect();
+      let best = null;
+      for (let i = 0; i < f.layout.n; i++) {
+        if (i === focus) continue;
+        const p = f.project(i);
+        const x = Math.round(p.x);
+        const y = Math.round(p.y);
+        const gap = Math.hypot(c.x - x, c.y - y) - r;
+        if (gap < 4 || (best && gap >= best.gap) || x < 80 || x > innerWidth - 80 || y < 120 || y > innerHeight - 130) continue;
+        if (x > card.left - 30 && x < card.right + 30 && y > card.top - 30 && y < card.bottom + 30) continue;
+        if (f.pickAt(x, y, focus) === i && document.elementFromPoint(x, y)?.classList.contains('starfield')) best = { i, x, y, gap };
+      }
+      return best;
+    });
+    check('with a card open, another pickable star clear of the focused one is reachable', !!out);
+    if (out) {
+      const gap = out.gap;
+      await page.mouse.move(out.x, out.y);
+      await sleep(150);
+      const h = await page.evaluate(() => ({ hover: window.__starfield.state().hover, ring: document.querySelector('.star-ring').classList.contains('is-visible'), cursor: document.querySelector('canvas.starfield').style.cursor }));
+      check('hover agrees off the focused star: the other star shows its ring and a pointer cursor', h.hover === out.i && h.ring && h.cursor === 'pointer', JSON.stringify(h));
+      await page.mouse.down();
+      await page.mouse.up();
+      await sleep(1500);
+      s = await state(page);
+      const msg2 = await page.locator('.card-msg').textContent();
+      check('a click outside the focused star on another pickable star selects it', s.focus === out.i && !s.flying && msg2 === data.commits[out.i][6] && !(await page.locator('.card').isHidden()), `star ${out.i}, ${gap.toFixed(1)}px outside the focused star's radius`);
+      if (s.focus === out.i) await sweepFocused(page, 'chain, third star');
+    }
+
     await page.keyboard.press('Escape');
     await sleep(1500);
     s = await state(page);
@@ -3932,6 +3970,67 @@ const clickableStar = (page, exclude = []) =>
     }
     return null;
   }, exclude);
+
+// with a commit card open, hovers then clicks the focused star at its center and on rings out to its edge (the pick
+// rule's radius). every point must leave the camera, the focus and the card alone and show no hover, ring or pointer
+// cursor. a point is contested when another pickable star's radius also covers it, so the sweep says how many points
+// a star behind the focused one could have taken
+async function sweepFocused(page, tag) {
+  const st = await state(page);
+  const before = { focus: st.focus, cam: st.cam };
+  const fp = await page.evaluate((i) => window.__starfield.project(i), st.focus);
+  await page.mouse.move(fp.x, fp.y);
+  await sleep(1200);
+  const spots = [[0, 0]];
+  for (let a = 0; a < 8; a++) for (const k of [0.4, 0.75, 0.95]) spots.push([a, k]);
+  let tried = 0;
+  let contested = 0;
+  const clicks = [];
+  const hovers = [];
+  for (const [a, k] of spots) {
+    const p = await page.evaluate(
+      ({ a, k }) => {
+        const f = window.__starfield;
+        const focus = f.state().focus;
+        const c = f.project(focus);
+        const r = Math.max(14, c.size / 2 + 8);
+        // whole pixels, since a click reports whole pixel coordinates
+        const x = Math.round(c.x + Math.cos((a * Math.PI) / 4) * r * k);
+        const y = Math.round(c.y + Math.sin((a * Math.PI) / 4) * r * k);
+        let other = false;
+        for (let j = 0; j < f.layout.n; j++) {
+          if (j === focus) continue;
+          const q = f.project(j);
+          if (q.dist >= 0.8 && q.coc < 26 && q.lo <= 0.5 && Math.hypot(q.x - x, q.y - y) <= Math.max(14, q.size / 2 + 8)) other = true;
+        }
+        return { x, y, other, inside: Math.hypot(c.x - x, c.y - y) <= r, canvas: !!document.elementFromPoint(x, y)?.classList.contains('starfield') };
+      },
+      { a, k }
+    );
+    if (!p.canvas || !p.inside) continue;
+    tried++;
+    if (p.other) contested++;
+    await page.mouse.move(p.x, p.y);
+    await sleep(120);
+    const h = await page.evaluate(() => ({ hover: window.__starfield.state().hover, ring: document.querySelector('.star-ring').classList.contains('is-visible'), cursor: document.querySelector('canvas.starfield').style.cursor }));
+    await page.mouse.down();
+    await page.mouse.up();
+    await sleep(120);
+    const s = await state(page);
+    const moved = Math.hypot(s.cam.x - before.cam.x, s.cam.y - before.cam.y, s.cam.z - before.cam.z);
+    const open = !(await page.locator('.card').isHidden());
+    const at = `${a * 45}deg ${k}`;
+    if (h.hover !== -1 || h.ring || h.cursor !== '') hovers.push(`${at}: hover ${h.hover} ring ${h.ring} cursor '${h.cursor}'`);
+    if (s.focus !== before.focus || s.flying || moved > 1e-4 || !open) {
+      clicks.push(`${at}: focus ${s.focus} flying ${s.flying} card ${open}`);
+      // the scene has left the star, so the remaining points would test something else
+      break;
+    }
+  }
+  const head = `star ${before.focus}, ${tried} points, ${contested} contested`;
+  check(`${tag}: clicks anywhere on the focused star change nothing`, tried >= 20 && !clicks.length, [head, ...clicks].join('; '));
+  check(`${tag}: hover agrees with the click on the focused star: no hover, ring or pointer cursor`, tried >= 20 && !hovers.length, [head, ...hovers.slice(0, 3)].join('; '));
+}
 
 // b1 and b7: one breakpoint for js and css. phones in landscape get the narrow view, a landscape tablet keeps the desktop
 async function breakpointChecks(gpu) {
