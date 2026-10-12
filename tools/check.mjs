@@ -43,6 +43,8 @@ async function launch(options) {
     await context.route(PROD_WORKER, (route) =>
       route.fulfill({ status: 200, contentType: 'application/json', headers: { 'access-control-allow-origin': '*' }, body: '{"state":"idle"}' })
     );
+    // the baseline tree draws this tree's data, so a data refresh since the copy was taken is no difference
+    await context.route(`http://localhost:${PORT + 1}/data/*.json`, (route) => route.fulfill({ path: path.join(ROOT, 'data', path.basename(new URL(route.request().url()).pathname)) }));
     return context;
   };
   return browser;
@@ -72,6 +74,13 @@ async function open(browser, url, { width = 1440, height = 900, dsf = 1, reduced
 
 const sceneReady = (page) => page.waitForSelector('.mode-toggle:not([hidden])', { timeout: 15000 });
 const state = (page) => page.evaluate(() => window.__starfield.state());
+
+// the first language in the legend whose color is not the accent now, so pinning it visibly moves the accent
+const unlikeAccent = (page) =>
+  page.evaluate(() => {
+    const accent = getComputedStyle(document.documentElement).getPropertyValue('--accent').trim();
+    return [...document.querySelectorAll('.legend-dot:not(.legend-all)')].find((b) => b.style.getPropertyValue('--c') !== accent)?.dataset.lang ?? null;
+  });
 
 // a point on the canvas where no star can be picked and nothing else sits on top
 async function emptySpot(page) {
@@ -259,20 +268,23 @@ async function interactChecks(gpu) {
   await sceneReady(page);
   await sleep(1800);
   const data = await page.evaluate(() => fetch('./data/commits.json').then((r) => r.json()));
+  // ordered like the page: newest first, stable
+  data.commits.sort((a, b) => b[2] - a[2]);
 
   // legend hover and pin
   const dots = page.locator('.legend-dot:not(.legend-all)');
+  const first = Number(await dots.nth(0).getAttribute('data-lang'));
   await dots.nth(0).hover();
   await sleep(450);
   let s = await state(page);
   const label = await page.locator('.legend-label').textContent();
-  check('legend hover filters the field', s.filter === 0 && (await page.locator('.legend.is-filtering').count()) === 1, `filter=${s.filter} label="${label}"`);
+  check('legend hover filters the field', s.filter === first && (await page.locator('.legend.is-filtering').count()) === 1, `filter=${s.filter} label="${label}"`);
   await page.screenshot({ path: `${OUT}/legend-hover.png` });
   await dots.nth(0).click();
   await page.mouse.move(700, 500);
   await sleep(450);
   s = await state(page);
-  check('legend click pins the filter', s.filter === 0 && (await dots.nth(0).getAttribute('aria-pressed')) === 'true');
+  check('legend click pins the filter', s.filter === first && (await dots.nth(0).getAttribute('aria-pressed')) === 'true');
   await page.keyboard.press('Escape');
   await sleep(350);
   s = await state(page);
@@ -368,7 +380,7 @@ async function interactChecks(gpu) {
     const c = data.commits[s.focus];
     const repo = c && data.repos[c[0]].name;
     check('click flies to the star and opens its card', card.visible && s.focus >= 0 && card.msg === c[6] && card.repo === repo, `focus=${s.focus}`);
-    check('card shows short hash and github link', card.hash === c[1].slice(0, 7) && card.link === `https://github.com/santihdzs/${encodeURIComponent(repo)}/commit/${c[1]}` && card.target === '_blank' && card.rel.includes('noopener'));
+    check('card shows short hash and github link', card.hash === c[1].slice(0, 7) && card.link === `https://github.com/${data.user}/${encodeURIComponent(repo)}/commit/${c[1]}` && card.target === '_blank' && card.rel.includes('noopener'));
     check('card takes focus and feeds the live region', card.focusInside && card.live.length > 10);
     check('camera ends just in front of the star', Math.abs(s.focal - 2.6) < 0.1 && !s.flying);
     await page.screenshot({ path: `${OUT}/card.png` });
@@ -857,13 +869,14 @@ async function alignChecks() {
                 lum.push(l);
                 max = Math.max(max, l);
               }
+              // the disc's shape, not its brightness: a large sharp star is lit as a sphere from the upper left, which
+              // would pull a brightness weighted centroid off its center. every pixel of the disc counts the same
               let sx = 0, sy = 0, sw = 0;
               lum.forEach((l, k) => {
-                if (l < max * 0.6) return;
-                const wgt = l - max * 0.6;
-                sx += (k % img.width + 0.5) * wgt;
-                sy += (Math.floor(k / img.width) + 0.5) * wgt;
-                sw += wgt;
+                if (l < max * 0.3) return;
+                sx += k % img.width + 0.5;
+                sy += Math.floor(k / img.width) + 0.5;
+                sw++;
               });
               return { x: sx / sw, y: sy / sw, w: img.width, max };
             },
@@ -1184,6 +1197,17 @@ async function browseChecks(gpu) {
   const langs = await page.evaluate(() => Array.from(window.__starfield.layout.langs));
   const n = langs.length;
   const listOf = (lang) => langs.map((l, i) => (l === lang ? i : -1)).filter((i) => i >= 0);
+  // the legend's names by language, the other bucket among them
+  const names = await page.$$eval('.legend-dot:not(.legend-all)', (bs) => Object.fromEntries(bs.map((b) => [b.dataset.lang, b.getAttribute('aria-label').replace(/, \d+ commits$/, '')])));
+  const OTHER = Number(Object.keys(names).find((k) => names[k] === 'other') ?? -1);
+  // from the data: top, the named language with the most commits, which a pin changes to; few, a named one with the
+  // fewest commits but at least two (a short walk that still steps) whose oldest commit has an older one of top
+  const named = [...new Set(langs)].filter((l) => l !== OTHER);
+  const top = named.reduce((a, b) => (listOf(b).length > listOf(a).length ? b : a), named[0]);
+  const few = named.filter((l) => l !== top && listOf(l).length >= 2 && langs.lastIndexOf(top) > listOf(l).at(-1)).sort((a, b) => listOf(a).length - listOf(b).length)[0];
+  const missing = [few === undefined && 'a named language with two or more commits, older ones of the most common language after them', !listOf(OTHER).length && 'commits in the other bucket'].filter(Boolean);
+  check('browse: the data has the languages the walks need', !missing.length, missing.join(', '));
+  if (missing.length) return context.close();
   // read after two frames, so the card has followed its star to wherever the last step left it
   const card = () =>
     page.evaluate(async () => {
@@ -1228,7 +1252,7 @@ async function browseChecks(gpu) {
   await sleep(300);
 
   // a pinned language with a few commits, through every stepping path
-  for (const [lang, name] of [[5, 'python'], [7, 'other']]) {
+  for (const [lang, name] of [[few, names[few]], [OTHER, 'other']]) {
     const list = listOf(lang);
     const t = list.length;
     await pinLegend(lang);
@@ -1259,24 +1283,24 @@ async function browseChecks(gpu) {
     }
     c = await card();
     check(`prev, ${name} pinned, repo toggle off: the arrow keys' commits, across repos, disabling at the oldest ${name} commit`, walked.join() === list.slice(1).join() && c.prev === true && c.focus === list[t - 1], `${walked.join(',')} prev disabled ${c.prev}`);
-    if (lang === 5) {
+    if (lang === few) {
       // a pin change under the open card: it stays put, the count follows the new set, steps go to the nearest one
       const before = await card();
-      await pinLegend(0);
+      await pinLegend(top);
       const after = await card();
       check('a pin change keeps the open card where it is and in place', after.focus === before.focus && after.rect === before.rect && (await page.locator('.card').isVisible()), `${before.rect} -> ${after.rect}`);
       // repo toggle off: prev and next turn off only where the new pin has nothing further in that direction
-      const older = langs.findIndex((l, i) => i > after.focus && l === 0);
-      const newer = langs.findLastIndex((l, i) => i < after.focus && l === 0);
+      const older = langs.findIndex((l, i) => i > after.focus && l === top);
+      const newer = langs.findLastIndex((l, i) => i < after.focus && l === top);
       // the toggle is off, so the repo counter stays hidden throughout
-      check('outside the new pin, the open card hides its n of total; prev and next follow the new pin across repos', after.count === null && after.pos === null && before.pos === null && after.prev === older < 0 && after.next === newer < 0 && after.browseFilter === 0, JSON.stringify(after));
-      await page.hover('.legend-dot[data-lang="5"]');
+      check('outside the new pin, the open card hides its n of total; prev and next follow the new pin across repos', after.count === null && after.pos === null && before.pos === null && after.prev === older < 0 && after.next === newer < 0 && after.browseFilter === top, JSON.stringify(after));
+      await page.hover(`.legend-dot[data-lang="${few}"]`);
       await sleep(200);
       const hovered = await card();
-      check('a legend hover only previews: browsing still follows the pin', hovered.filter === 5 && hovered.browseFilter === 0, JSON.stringify(hovered));
+      check('a legend hover only previews: browsing still follows the pin', hovered.filter === few && hovered.browseFilter === top, JSON.stringify(hovered));
       await page.mouse.move(720, 870);
       c = await press('ArrowLeft', older);
-      const js = listOf(0);
+      const js = listOf(top);
       check('the next step goes to the nearest commit of the new pin in that direction', c.focus === older && c.count === `${js.length - js.indexOf(older)} of ${js.length}`, JSON.stringify(c));
     }
     await page.keyboard.press('Escape');
@@ -1316,8 +1340,23 @@ async function repoScopeChecks(gpu) {
     return -1;
   };
   const all = [...Array(n).keys()];
-  // the newest commit outside the newest commit's repo, where stepping back with the toggle off first changes repo
-  const cross = rows.findIndex((r) => r.repo !== rows[0].repo);
+  const repoSize = (r, pin = null) => all.filter((j) => repoOf(j) === r && keeps(pin, j)).length;
+  const count = (pin) => all.filter((j) => keeps(pin, j)).length;
+  const reposIn = (pin) => new Set(all.filter((j) => keeps(pin, j)).map(repoOf)).size;
+  // the newest commit of the first repo after the newest commit's own that has two or more: stepping back that far
+  // with the toggle off changes repo, and with it on that commit has an older one and no newer
+  const cross = all.find((i) => repoOf(i) !== repoOf(0) && rows.findIndex((r) => r.repo === repoOf(i)) === i && repoSize(repoOf(i)) >= 2);
+  const OTHER = raw.languages.findIndex((l) => l.name === 'other');
+  const named = [...new Set(all.map(langOf))].filter((l) => l !== OTHER);
+  // few, a named language outside the newest commit's repo with the fewest commits but at least two, so its oldest has
+  // a newer one; wide, the named language in the most repos, so its walk crosses repos
+  const few = named.filter((l) => l !== langOf(0) && count(l) >= 2).sort((a, b) => count(a) - count(b))[0];
+  const wide = named.sort((a, b) => reposIn(b) - reposIn(a) || count(b) - count(a))[0];
+  // the newest commit outside the other bucket
+  const home = all.find((j) => langOf(j) !== OTHER);
+  const missing = [cross === undefined && 'a second repo with two or more commits', few === undefined && 'a named language outside the newest repo with two or more commits', !(reposIn(wide) > 1) && 'a named language in two or more repos', !(reposIn(OTHER) > 1) && 'the other bucket in two or more repos'].filter(Boolean);
+  check('repo scope: the data has the repos and languages the walks need', !missing.length, missing.join(', '));
+  if (missing.length) return;
   // the one counter the card shows: n of total with the toggle off, x of y in this repo with it on, neither for a
   // commit outside the pin
   const counters = (i, pin, repoOnly) => {
@@ -1532,7 +1571,6 @@ async function repoScopeChecks(gpu) {
 
   // toggle on: arrows and buttons stay in the repo and agree, from its newest through the middle to its oldest and back
   let w = await walk(null, true);
-  const repoSize = (r, pin = null) => all.filter((j) => repoOf(j) === r && keeps(pin, j)).length;
   check('repo toggle on, nothing pinned: arrows and buttons agree, stay in the repo, disable at its ends, quiet there', !w.bad.length && w.repos.size === 1 && w.seen.size === repoSize(repoOf(0)), `${w.seen.size} of ${repoSize(repoOf(0))} | ${w.bad.join(' ; ')}`);
 
   // the toggle with a card open: steps and disabled states change in place, the card and camera stay
@@ -1589,8 +1627,11 @@ async function repoScopeChecks(gpu) {
   await browseTo();
   await page.keyboard.press('ArrowLeft');
   await page.keyboard.press('ArrowLeft');
+  // two steps back inside the repo, or as far as it goes
+  want = 0;
+  for (let k = 0; k < 2; k++) if (ref(want, -1, null, true) >= 0) want = ref(want, -1, null, true);
   a = await look(page);
-  check('the toggle persists across closing and reopening a card', a.repoOnly && a.focus === ref(ref(0, -1, null, true), -1, null, true) && agrees(a, null, true), JSON.stringify(a));
+  check('the toggle persists across closing and reopening a card', a.repoOnly && a.focus === want && agrees(a, null, true), JSON.stringify(a));
   const star = await clickableStar(page);
   if (star) {
     await page.mouse.click(star.x, star.y);
@@ -1603,21 +1644,20 @@ async function repoScopeChecks(gpu) {
   }
   await close();
 
-  // toggle on, the repo's own language pinned: the intersection keeps the walk in this repo, never the other
-  // javascript repo
+  // toggle on, the repo's own language pinned: the intersection keeps the walk in this repo, never another repo of
+  // that language
   await pinLegend(langOf(0));
   await browseTo();
   w = await walk(langOf(0), true);
   check('repo toggle on, its own language pinned: arrows and buttons agree and stay in the repo', !w.bad.length && w.repos.size === 1 && w.seen.size === repoSize(repoOf(0), langOf(0)), `${w.seen.size} | ${w.bad.join(' ; ')}`);
   // strict: a pin that leaves this repo out turns both steps off and the arrows do nothing; the toggle stays on and
   // usable, and turning it off browses on to the nearest commit of the pin
-  const python = 5;
   a = await look(page);
-  await pinLegend(python);
+  await pinLegend(few);
   b = await look(page);
   // its height may change: a commit outside the pin hides its n of total
   check('pin changed with the toggle on: the card stays put, camera too', b.focus === a.focus && b.cam === a.cam && b.hash === a.hash, JSON.stringify(b));
-  check('toggle on, a pin outside the repo: prev and next both off, no fallback to other repos', b.prev && b.next && agrees(b, python, true), JSON.stringify(b));
+  check('toggle on, a pin outside the repo: prev and next both off, no fallback to other repos', b.prev && b.next && agrees(b, few, true), JSON.stringify(b));
   await frames(page, 2);
   a = await look(page);
   const quietBefore = said;
@@ -1632,15 +1672,14 @@ async function repoScopeChecks(gpu) {
   await page.click('.repo-only');
   await page.mouse.move(720, 600);
   b = await look(page);
-  check('toggle off: browsing returns to the pin, across repos', !b.repoOnly && agrees(b, python, false) && b.cam === a.cam, JSON.stringify(b));
+  check('toggle off: browsing returns to the pin, across repos', !b.repoOnly && agrees(b, few, false) && b.cam === a.cam, JSON.stringify(b));
   await page.keyboard.press('ArrowLeft');
   b = await look(page);
-  check('toggle off: the next step goes to the nearest commit of the pin in that direction', b.focus === ref(a.focus, -1, python, false) && b.focus >= 0, `${a.focus} -> ${b.focus}`);
+  check('toggle off: the next step goes to the nearest commit of the pin in that direction', b.focus === ref(a.focus, -1, few, false) && b.focus >= 0, `${a.focus} -> ${b.focus}`);
   await close();
 
   // toggle off: arrows and buttons agree from every commit, across repos, under no pin, a language and the other bucket
-  const OTHER = raw.languages.findIndex((l) => l.name === 'other');
-  for (const [pin, name] of [[null, 'nothing pinned'], [langOf(0), 'javascript pinned'], [OTHER, 'the other bucket pinned']]) {
+  for (const [pin, name] of [[null, 'nothing pinned'], [wide, `${raw.languages[wide].name} pinned`], [OTHER, 'the other bucket pinned']]) {
     await pinLegend(pin);
     await browseTo();
     w = await walk(pin, false);
@@ -1648,13 +1687,13 @@ async function repoScopeChecks(gpu) {
     check(`repo toggle off, ${name}: arrows and buttons agree from every commit, across repos, disable at the ends, quiet there`, !w.bad.length && w.seen.size === pass.length && w.repos.size > 1, `${w.seen.size} of ${pass.length} in ${w.repos.size} repos | ${w.bad.join(' ; ')}`);
     await close();
   }
-  await pinLegend(python);
+  await pinLegend(few);
   await browseTo();
-  const pythons = all.filter((j) => langOf(j) === python);
-  for (let k = 1; k < pythons.length; k++) await page.keyboard.press('ArrowLeft');
+  const fews = all.filter((j) => langOf(j) === few);
+  for (let k = 1; k < fews.length; k++) await page.keyboard.press('ArrowLeft');
   await frames(page, 2);
   a = await look(page);
-  check('the oldest commit of a pin: prev off, next on', a.focus === pythons.at(-1) && a.prev && !a.next, JSON.stringify(a));
+  check('the oldest commit of a pin: prev off, next on', a.focus === fews.at(-1) && a.prev && !a.next, JSON.stringify(a));
   await shot('repo-card-prev-disabled');
   await close();
 
@@ -1666,17 +1705,18 @@ async function repoScopeChecks(gpu) {
   w = await walk(OTHER, true);
   check('toggle on, the other bucket pinned: a repo in it browses within the repo', !w.bad.length && w.repos.size === 1 && w.seen.size === repoSize(repoOf(start), OTHER), `${w.seen.size} | ${w.bad.join(' ; ')}`);
   await close();
-  await pinLegend(null);
+  // browse opens the newest commit outside the bucket: the newest of all, or the newest of its language pinned first
+  await pinLegend(home ? langOf(home) : null);
   await browseTo();
   await pinLegend(OTHER);
   b = await look(page);
-  check('toggle on, the other bucket pinned: a repo outside it has prev and next off', b.focus === 0 && b.prev && b.next && agrees(b, OTHER, true), JSON.stringify(b));
+  check('toggle on, the other bucket pinned: a repo outside it has prev and next off', b.focus === home && b.prev && b.next && agrees(b, OTHER, true), JSON.stringify(b));
   // a pin change from none to the repo's own language, toggle on: in place
   await pinLegend(null);
   a = await look(page);
-  await pinLegend(langOf(0));
+  await pinLegend(langOf(home));
   b = await look(page);
-  check('pin changed to the repo\'s own language with the toggle on: in place, the steps follow at once', b.focus === a.focus && b.cam === a.cam && agrees(b, langOf(0), true), JSON.stringify(b));
+  check('pin changed to the repo\'s own language with the toggle on: in place, the steps follow at once', b.focus === a.focus && b.cam === a.cam && agrees(b, langOf(home), true), JSON.stringify(b));
   await pinLegend(null);
 
   // keyboard: the toggle is the last stop of the card's tab cycle, both ways, and enter and space flip it
@@ -1730,8 +1770,7 @@ async function repoScopeChecks(gpu) {
       return { rgb, color: getComputedStyle(document.querySelector('.repo-only')).color };
     });
   const plain = await accent();
-  // javascript: python's slot is the default accent itself
-  await pinLegend(langOf(0));
+  await pinLegend(await unlikeAccent(page));
   await sleep(300);
   const pinned = await accent();
   check('the pressed toggle takes the accent color and follows a pin', plain.color === plain.rgb && pinned.color === pinned.rgb && pinned.rgb !== plain.rgb, JSON.stringify({ plain, pinned }));
@@ -1751,7 +1790,7 @@ async function repoScopeChecks(gpu) {
 
   // a repo with a single commit: both steps off with the toggle on
   {
-    const solo = { ...raw, repos: [...raw.repos, { name: 'solo', lang: python, primary: 'python' }], commits: [[raw.repos.length, 'f'.repeat(40), rows[0].ts + 100, 1, 1, 1, 'solo'], ...raw.commits] };
+    const solo = { ...raw, repos: [...raw.repos, { name: 'solo', lang: few, primary: raw.languages[few].name }], commits: [[raw.repos.length, 'f'.repeat(40), rows[0].ts + 100, 1, 1, 1, 'solo'], ...raw.commits] };
     const ctx = await gpu.newContext({ viewport: { width: 1440, height: 900 }, reducedMotion: 'reduce' });
     await ctx.route('**/data/commits.json', (route) => route.fulfill({ contentType: 'application/json', body: JSON.stringify(solo) }));
     const p = await ctx.newPage();
@@ -2622,24 +2661,9 @@ async function chainChecks(gpu) {
   const home = (await state(page)).cam;
   await page.click('.browse');
   await sleep(1500);
-  const otherStar = (exclude) =>
-    page.evaluate((ex) => {
-      const f = window.__starfield;
-      const st = f.state();
-      const card = document.querySelector('.card').getBoundingClientRect();
-      for (let i = 0; i < f.layout.n; i++) {
-        if (i === st.focus || ex.includes(i)) continue;
-        const p = f.project(i);
-        if (p.coc >= 26 || p.dist < 0.8 || p.x < 80 || p.x > innerWidth - 80 || p.y < 120 || p.y > innerHeight - 130) continue;
-        if (p.x > card.left - 30 && p.x < card.right + 30 && p.y > card.top - 30 && p.y < card.bottom + 30) continue;
-        if (f.pickAt(p.x, p.y, st.focus) === i && document.elementFromPoint(p.x, p.y)?.classList.contains('starfield')) return { i, x: p.x, y: p.y };
-      }
-      return null;
-    }, exclude);
-
   let s = await state(page);
   const first = s.focus;
-  const target = await otherStar([]);
+  const target = await clickableStar(page, []);
   check('another pickable star is reachable while a card is open', !!target);
   if (target) {
     await page.mouse.move(target.x, target.y);
@@ -2648,13 +2672,14 @@ async function chainChecks(gpu) {
     check('hover works for other stars while a card is open', h.ring && h.hover === target.i && h.hover !== h.focus);
     await page.mouse.click(target.x, target.y);
     // a click mid flight is dropped, not queued
-    const third = await otherStar([target.i]);
+    const third = await clickableStar(page, [target.i]);
     await sleep(200);
     if (third) await page.mouse.click(third.x, third.y);
     await sleep(1500);
     s = await state(page);
     const msg = await page.locator('.card-msg').textContent();
     const data = await page.evaluate(() => fetch('./data/commits.json').then((r) => r.json()));
+    data.commits.sort((a, b) => b[2] - a[2]);
     check('clicking another star flies there and the card swaps to it', s.focus === target.i && msg === data.commits[target.i][6] && !(await page.locator('.card').isHidden()));
     check('a click during the flight was ignored', s.focus === target.i);
     check('the original position is kept across chained flights', Math.abs(s.saved.z - home.z) < 0.01 && Math.abs(s.saved.x - home.x) < 0.01, JSON.stringify(s.saved));
@@ -2925,13 +2950,20 @@ async function accentChecks(gpu) {
         };
       });
     const base = await read();
-    const dots = page.locator('.legend-dot:not(.legend-all)');
-    const color = await dots.nth(1).evaluate((b) => b.style.getPropertyValue('--c'));
-    await dots.nth(1).hover();
+    const lang = await unlikeAccent(page);
+    const other = page.locator('.legend-dot[aria-label^="other,"]');
+    if (lang === null || !(await other.count())) {
+      check(`${tag}accent: the legend has a language unlike the default accent and the other bucket`, false, `${lang}, ${await other.count()} other`);
+      await context.close();
+      continue;
+    }
+    const dot = page.locator(`.legend-dot[data-lang="${lang}"]`);
+    const color = await dot.evaluate((b) => b.style.getPropertyValue('--c'));
+    await dot.hover();
     await sleep(450);
     const hovered = await read();
     check(`${tag}hover previews leave the accent alone`, hovered.accent === base.accent && base.accent === '#4ade80');
-    await dots.nth(1).click();
+    await dot.click();
     await sleep(reduced ? 40 : 120);
     const mid = await read();
     await sleep(reduced ? 40 : 450);
@@ -2956,12 +2988,11 @@ async function accentChecks(gpu) {
     const back = await read();
     check(`${tag}unpinning returns to the default green and the default favicon`, back.accent === '#4ade80' && back.icon === './favicon.svg', JSON.stringify(back));
     // the gray "other" bucket gets no special case
-    const last = dots.last();
-    const otherColor = await last.evaluate((b) => b.style.getPropertyValue('--c'));
-    await last.click();
+    const otherColor = await other.evaluate((b) => b.style.getPropertyValue('--c'));
+    await other.click();
     await sleep(reduced ? 40 : 500);
     check(`${tag}the "other" bucket pins its own color like any language`, (await read()).accent === otherColor, otherColor);
-    await last.click();
+    await other.click();
     check(`${tag}accent checks left the console clean`, !logs.length, logs.join(' | '));
     await context.close();
   }
@@ -3640,7 +3671,12 @@ async function nebulaColorChecks(gpu) {
       from
     );
   const base = await colors();
-  const dot = page.locator('.legend-dot:not(.legend-all)').first();
+  const lang = await unlikeAccent(page);
+  if (lang === null) {
+    check('nebula color: the legend has a language unlike the default accent', false);
+    return context.close();
+  }
+  const dot = page.locator(`.legend-dot[data-lang="${lang}"]`);
   const pinning = track(base);
   await dot.click();
   const pinSeq = await pinning;
@@ -3876,17 +3912,22 @@ async function attempt(name, fn) {
 // the one narrow breakpoint, as js and css both spell it
 const NARROW_QUERY = '(max-width: 720px), (max-height: 500px) and (pointer: coarse) and (orientation: landscape)';
 
-// a pickable star other than the focused one, clear of the card, that a click on the field would reach
+// a pickable star other than the focused one, clear of the card, that a click on the field would reach. no other star a
+// click could take, the focused one included, reaches within 6px of it, so a burst of commits stacked on one spot
+// never makes the hover or the click mean a neighbour
 const clickableStar = (page, exclude = []) =>
   page.evaluate((ex) => {
     const f = window.__starfield;
     const st = f.state();
     const card = document.querySelector('.card').getBoundingClientRect();
+    const all = [];
+    for (let j = 0; j < f.layout.n; j++) all.push({ j, ...f.project(j) });
     for (let i = 0; i < f.layout.n; i++) {
       if (i === st.focus || ex.includes(i)) continue;
-      const p = f.project(i);
+      const p = all[i];
       if (p.coc >= 26 || p.dist < 0.8 || p.x < 80 || p.x > innerWidth - 80 || p.y < 120 || p.y > innerHeight - 130) continue;
       if (p.x > card.left - 30 && p.x < card.right + 30 && p.y > card.top - 30 && p.y < card.bottom + 30) continue;
+      if (all.some((q) => q.j !== i && q.dist > 0.05 && q.coc < 26 && Math.hypot(q.x - p.x, q.y - p.y) < Math.max(14, q.size / 2 + 8) + 6)) continue;
       if (f.pickAt(p.x, p.y, st.focus) === i && document.elementFromPoint(p.x, p.y)?.classList.contains('starfield')) return { i, x: p.x, y: p.y };
     }
     return null;
@@ -3981,6 +4022,7 @@ async function fixesChecks(gpu) {
     await attempt(`a second star clicked with a card open${pinned ? ', a language pinned' : ''}`, async () => {
       const { page, context, logs } = await open(gpu, `${ORIGIN}/?debug`, { width: 1440, height: 900 });
       await sceneReady(page);
+      const first = Number(await page.locator('.legend-dot:not(.legend-all)').first().getAttribute('data-lang'));
       if (pinned) {
         await page.locator('.legend-dot:not(.legend-all)').first().click();
         await page.mouse.move(700, 880);
@@ -4015,7 +4057,7 @@ async function fixesChecks(gpu) {
         }));
         v = { target: target.i, landed, stepped, ...after };
       }
-      const pinOk = pinned ? v?.pressed === 'true' && v.browseFilter === 0 : v?.pressed === 'false';
+      const pinOk = pinned ? v?.pressed === 'true' && v.browseFilter === first : v?.pressed === 'false';
       check(`a second star clicked with a card open${pinned ? ', a language pinned' : ''}: focus stays in the card, arrows step, escape closes only the card`, !!v && v.landed.focus === v.target && v.landed.inside && v.stepped !== v.landed.focus && v.stars && v.cardHidden && v.focus === -1 && pinOk, JSON.stringify(v));
       check(`second star check${pinned ? ', pinned,' : ''} left the console clean`, !logs.length, logs.join(' | '));
       await context.close();
@@ -4091,9 +4133,11 @@ async function fixesChecks(gpu) {
   // b5: nine languages fold into eight, picking and browsing keep working
   await attempt('b5 nine languages', async () => {
     const real = JSON.parse(await readFile(path.join(ROOT, 'data', 'commits.json'), 'utf8'));
-    const named = real.languages.filter((l) => l.name !== 'other').slice(0, 7);
+    // seven named languages whatever the data has, then zig and other. the first two repos take the two that fold, so
+    // the folded bucket always has commits
+    const named = [...real.languages.filter((l) => l.name !== 'other'), ...Array.from({ length: 7 }, (_, k) => ({ name: `pad${k}`, slot: k }))].slice(0, 7);
     const languages = [...named, { name: 'zig', slot: 6 }, { name: 'other', slot: 8 }];
-    const nine = { ...real, languages, repos: real.repos.map((r, i) => ({ ...r, lang: i % languages.length })) };
+    const nine = { ...real, languages, repos: real.repos.map((r, i) => ({ ...r, lang: (i + 7) % languages.length })) };
     const context = await gpu.newContext({ viewport: { width: 1440, height: 900 } });
     await context.route('**/data/commits.json', (route) => route.fulfill({ contentType: 'application/json', body: JSON.stringify(nine) }));
     const page = await context.newPage();
